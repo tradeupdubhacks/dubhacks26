@@ -15,6 +15,7 @@ interface Socket {
   on(event: 'message', listener: (raw: Buffer) => void): void
   on(event: 'close', listener: () => void): void
 }
+import { loadHistory } from './history.js'
 import { fetchSolMid } from './price.js'
 import { schemas } from './schema.js'
 
@@ -31,6 +32,7 @@ export async function buildApp(options?: {
   logger?: boolean
   clock?: boolean
   chain?: Chain | null
+  historyFetch?: typeof fetch
 }): Promise<App> {
   const market = new Market(options?.tapeDir ?? join(root, 'hft', 'data', 'raw'), options?.chain ?? null)
   const app = Fastify({ logger: options?.logger ?? false })
@@ -141,6 +143,18 @@ export async function buildApp(options?: {
     ...(options?.chain ? { chain: options.chain.snapshot() } : {}),
   }))
   app.get('/v1/instruments', async () => instrumentsBody())
+  app.get('/v1/history', async (request, reply) => {
+    const query = isRecord(request.query) ? request.query : {}
+    const result = await loadHistory(
+      {
+        symbol: stringQuery(query.symbol),
+        interval: stringQuery(query.interval),
+        limit: stringQuery(query.limit),
+      },
+      options?.historyFetch,
+    )
+    return reply.code(result.status).send(result.body)
+  })
   app.get('/v1/schema', async () => schemas)
   app.get('/v1/book', async () => {
     const view = market.observation()
@@ -347,6 +361,10 @@ function bodyOf(body: unknown): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function stringQuery(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
 }
 
 function parseMessage(raw: Buffer | ArrayBuffer | Buffer[]): Record<string, unknown> | null {

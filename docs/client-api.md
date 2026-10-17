@@ -170,10 +170,15 @@ HTTP errors use this body. Watch-socket errors use the same `error` object insid
 | 400 | `invalid_type` | A field has the wrong JSON type. |
 | 400 | `deposit_out_of_range` | Deposit is missing or not an integer from `100` to `10000`. |
 | 400 | `unknown_instrument` | Symbol is not in `GET /v1/instruments`. |
+| 400 | `bad_symbol` | `GET /v1/history` symbol is missing or not a coin ticker. |
+| 400 | `bad_interval` | `GET /v1/history` interval is not one of the documented values. |
+| 400 | `bad_limit` | `GET /v1/history` limit is not an integer from `1` to `500`. |
+| 404 | `unknown_symbol` | `GET /v1/history` coin has no USD market on Binance, Coinbase, or Kraken. |
 | 400 | `floor_out_of_range` | Floor is not an integer, is below `0`, or is greater than or equal to the deposit. |
 | 400 | `ceiling_required` | Ceiling was omitted. |
 | 400 | `ceiling_not_above_deposit` | Ceiling is not an integer strictly above the deposit. |
 | 404 | `no_session` | `GET /v1/session` or `POST /v1/stop` while idle. |
+| 502 | `history_unavailable` | The public candle source did not answer `GET /v1/history`. |
 | 409 | `session_running` | `POST /v1/session` while a session is still `running`. |
 
 A halted session does not block `POST /v1/session`. Creating a session replaces the halted one.
@@ -427,6 +432,66 @@ The socket stays open. Stop is `POST /v1/stop`, not a watch message.
 **Dropped sockets**
 
 The server does not wait on a slow watch client. If the socket's send buffer backs up, the server closes it. The page reconnects and takes the next snapshot as the truth.
+
+### `GET /v1/history`
+
+Candles for a coin the page wants to chart. This is not the session book and it does not start a session. Any coin with a USD market on Binance, Coinbase, or Kraken is accepted, including coins that are not in `GET /v1/instruments`. A session can still trade only a symbol from that list.
+
+`SOL`, `SOL-USD`, and `SOLUSDT` are the same coin. `BTC-USDT` is `BTC`. The response `symbol` is the base ticker.
+
+**Parameters**
+
+| Name | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `symbol` | yes | | Coin ticker, or an instrument symbol such as `SOL-USD`. |
+| `interval` | no | `1h` | One of `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. |
+| `limit` | no | `100` | Number of candles, from `1` to `500`. Oldest first. |
+
+**Response 200**
+
+```json
+{
+  "symbol": "ETH",
+  "market": "ETH-USD",
+  "interval": "1h",
+  "source": "coinbase",
+  "candles": [
+    {
+      "openTime": "2026-10-17T15:00:00.000Z",
+      "openCents": 350012,
+      "highCents": 351000,
+      "lowCents": 349500,
+      "closeCents": 350550,
+      "open": "3500.12",
+      "high": "3510.00",
+      "low": "3495.00",
+      "close": "3505.50",
+      "volume": "12.5"
+    }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `symbol` | string | Base coin, without `-USD`. |
+| `market` | string | `{symbol}-USD`. A label for the chart, not a session instrument. |
+| `interval` | string | The interval that was used. |
+| `source` | `"binance"` \| `"coinbase"` \| `"kraken"` | Whichever public candle source answered. Tried in that order. The order is not sent there. |
+| `candles` | array | Oldest first. |
+| `candles[].openTime` | string | Candle open, ISO-8601. |
+| `candles[].openCents` / `highCents` / `lowCents` / `closeCents` | integer | `round(usd * 100)`. A coin under one cent can be `0`. |
+| `candles[].open` / `high` / `low` / `close` | string | USD price from the exchange, decimal text. Plot these when cents would round away the price. |
+| `candles[].volume` | string | Base-coin volume, decimal text. |
+
+**Errors.** `bad_symbol`, `bad_interval`, `bad_limit`, `unknown_symbol`, `history_unavailable`. See [Error](#error).
+
+**Use cases**
+
+- The user changes the coin picker. Request `GET /v1/history?symbol=ETH&interval=1h` and draw `close` against `openTime` before they start a session.
+- Pass the instrument symbol directly: `GET /v1/history?symbol=SOL-USD`.
+- A coin none of those sources lists returns `404` `unknown_symbol`. Leave the chart empty.
+- `502` `history_unavailable` means the candle source failed. The session, stake, and book are unchanged.
 
 ## What this API will not do
 
