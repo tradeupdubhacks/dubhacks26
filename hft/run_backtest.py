@@ -1,6 +1,7 @@
 """Convert one Tardis day and replay a join-the-touch quote on Binance BTCUSDT.
 
 Reported fills use the risk-averse queue: cancellations do not improve queue place.
+The exchange model is no-partial-fill because partial fills abort in hftbacktest 2.4.4.
 Fees are Binance USD-M regular-user rates from the futures fee FAQ: 0.02% maker,
 0.05% taker. Funding is applied afterwards from Tardis settlement rows, because the
 replay engine does not book perpetual funding.
@@ -114,7 +115,12 @@ def main() -> None:
         .linear_asset(1.0)
         .constant_order_latency(ORDER_ENTRY_LATENCY_NS, ORDER_RESPONSE_LATENCY_NS)
         .risk_adverse_queue_model()
-        .partial_fill_exchange()
+        # partial_fill_exchange raises InvalidOrderStatus (14) in hftbacktest 2.4.4
+        # when a trade quantity exactly equals the remaining order. See
+        # https://github.com/nkaz001/hftbacktest/issues/312
+        # At a 0.001 lot, no_partial_fill fills the whole order once a trade
+        # reaches it. Trades smaller than the order can overfill.
+        .no_partial_fill_exchange()
         .trading_value_fee_model(MAKER_FEE, TAKER_FEE)
         .tick_size(TICK_SIZE)
         .lot_size(LOT_SIZE)
@@ -122,7 +128,8 @@ def main() -> None:
     hbt = HashMapMarketDepthBacktest([asset])
     recorder = Recorder(1, 1_000_000)
     print("replaying")
-    join_the_touch(hbt, recorder.recorder)
+    end_code = join_the_touch(hbt, recorder.recorder)
+    print(f"elapse_end_code {end_code}")
     hbt.close()
 
     records = recorder.get(0)

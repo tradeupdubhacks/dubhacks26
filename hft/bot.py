@@ -19,7 +19,15 @@ def join_the_touch(hbt, recorder):
     asset_no = 0
     tick_size = hbt.depth(asset_no).tick_size
 
-    while hbt.elapse(STEP_NS) == 0:
+    steps = 0
+    while True:
+        code = hbt.elapse(STEP_NS)
+        if code != 0:
+            return code
+        steps += 1
+        if steps % 36000 == 0:
+            print(hbt.current_timestamp)
+
         hbt.clear_inactive_orders(asset_no)
 
         depth = hbt.depth(asset_no)
@@ -58,5 +66,3 @@ def join_the_touch(hbt, recorder):
                 )
 
         recorder.record(hbt)
-
-    return True
