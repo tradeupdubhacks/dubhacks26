@@ -23,6 +23,8 @@ Commands below are run from `dubhacks26/`.
 
    The installer also adds that `PATH` line to `~/.profile` and `~/.bash_profile`. Open a new shell, or run the `export` line, before the first start.
 
+   On Windows, that script refuses to run. Download `https://release.anza.xyz/stable/agave-install-init-x86_64-pc-windows-msvc.exe`, run `agave-install-init.exe stable`, and open a new terminal so `solana-test-validator.exe` is on `PATH`. The server looks for the `.exe` under `%USERPROFILE%\.local\share\solana\install\active_release\bin`. Agave 4.3.1 cannot create a new ledger on Windows (`os error 5` while checking `genesis.tar.bz2`), so a Windows start copies `chain/fresh-ledger` and does not pass `--reset`. Linux and macOS still pass `--reset` and create a ledger themselves.
+
 The BTC replay files are already in `hft/data/raw/` (`BTCUSDT_20261001_book_ticker.csv.gz` and `BTCUSDT_20261001_trades.csv.gz`). A live `SOL-USD` session reads a public mid from Binance, then Jupiter, then Coinbase, so that machine needs outbound HTTPS.
 
 ## Start

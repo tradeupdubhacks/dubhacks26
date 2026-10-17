@@ -21,7 +21,7 @@ server = pytest.mark.skipif(not _up(), reason="model API is not running on port 
 def test_health_is_fake_execution():
     body = ModelClient().health()
     assert body["ok"] is True
-    assert body["execution"] == "fake"
+    assert body["execution"] in ("fake", "solana")
 
 
 @server

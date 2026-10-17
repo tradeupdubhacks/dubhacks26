@@ -2,7 +2,7 @@
 
 This process places paper orders on the model API in [docs/model-api.md](../docs/model-api.md). It does not open a user session and it does not edit the page. Fills are the server's fake matches. `BTC-USDT` follows that server's recording. `SOL-USD` follows that server's public mid. Nothing here is a low-latency exchange connection.
 
-Start the API server on `http://localhost:3000` first. `GET /v1/health` must report `execution: "fake"`. The bot exits if it does not.
+Start the API server on `http://localhost:3000` first. `GET /v1/health` must report `execution: "fake"` or `"solana"`. `npm start` reports `"solana"` because live fills settle on the local validator. The bot exits for any other value.
 
 ```text
 pip install -r model/requirements.txt

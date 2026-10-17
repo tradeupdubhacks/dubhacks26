@@ -6,7 +6,7 @@ Base URL: `http://localhost:3000`
 
 WebSocket: `ws://localhost:3000`
 
-All JSON bodies use `Content-Type: application/json`. There is no authentication. Accounts, cash, and fills are dummy ledger entries on localhost. Market data may be read from a local tape or from a public mid. The order itself is never forwarded to Binance, Jupiter, Coinbase, or Solana.
+All JSON bodies use `Content-Type: application/json`. There is no authentication. Accounts, cash, and fills are dummy ledger entries on localhost. Market data may be read from a local tape or from a public mid. The order itself is never forwarded to Binance, Jupiter, or Coinbase. Training fills stay in memory. A live session fill is an SPL transfer on the local validator.
 
 Two ways to run, and they do not overlap:
 
@@ -235,13 +235,15 @@ Shape failures on a single REST place return `400` with `error.reason` set to th
 Same body as the client API.
 
 ```json
-{ "ok": true, "mode": "localhost", "execution": "fake" }
+{ "ok": true, "mode": "localhost", "execution": "solana" }
 ```
+
+`npm start` reports `"solana"`. A process built without a chain, including `npm test`, reports `"fake"`. Training orders stay in memory either way. Live session fills are SPL transfers only when `execution` is `"solana"`.
 
 **Use cases**
 
 - Fail a trainer fast when the server is down.
-- Confirm `execution` is `fake` before sending orders, so a caller does not assume the fills are on an exchange.
+- Confirm `execution` is `fake` or `solana` before sending orders. Any other value means the fills are not this gateway.
 
 ### `GET /v1/instruments`
 

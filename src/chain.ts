@@ -1,7 +1,8 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   Connection,
   Keypair,
@@ -147,22 +148,46 @@ export class LocalSolana implements Chain {
 
   private async launch(): Promise<void> {
     const bin = findValidator()
+    // #region agent log
+    debugLog('A', 'chain.ts:launch', 'validator lookup', { platform: process.platform, bin, delimiter })
+    // #endregion
     if (!bin) {
       throw new ChainError(
         'Nothing is listening on the local Solana RPC, and solana-test-validator is not installed. Install the Agave CLI and restart.',
       )
     }
-    const log = openSync(join(this.directory, 'validator.log'), 'a')
-    this.child = spawn(
-      bin,
-      ['--reset', '--quiet', '--bind-address', '127.0.0.1', '--rpc-port', String(this.port), '--ledger', join(this.directory, 'ledger')],
-      { stdio: ['ignore', log, log], env: { ...process.env, PATH: `${dirname(bin)}:${process.env.PATH ?? ''}` } },
-    )
+    const prepared = prepareLedger(this.directory)
+    const args = ['--quiet', '--bind-address', '127.0.0.1', '--rpc-port', String(this.port), '--ledger', prepared.ledger]
+    if (prepared.reset) args.unshift('--reset')
+    // #region agent log
+    debugLog('C', 'chain.ts:launch', 'spawn plan', {
+      reset: prepared.reset,
+      voteKeypair: existsSync(join(prepared.ledger, 'vote-account-keypair.json')),
+      pathHasDelimiter: `${dirname(bin)}${delimiter}${process.env.PATH ?? ''}`.includes(delimiter),
+    })
+    // #endregion
+    const logPath = join(this.directory, 'validator.log')
+    const log = openSync(logPath, 'a')
+    this.child = spawn(bin, args, {
+      stdio: ['ignore', log, log],
+      env: { ...process.env, PATH: `${dirname(bin)}${delimiter}${process.env.PATH ?? ''}` },
+    })
     for (let attempt = 0; attempt < 60; attempt += 1) {
-      if (await this.reachable()) return
-      if (this.child.exitCode !== null) break
+      if (await this.reachable()) {
+        // #region agent log
+        debugLog('D', 'chain.ts:launch', 'validator accepted rpc', { exitCode: this.child.exitCode, attempt })
+        // #endregion
+        return
+      }
+      if (this.child.exitCode !== null && this.child.exitCode !== 0) break
       await delay(500)
     }
+    // #region agent log
+    debugLog('D', 'chain.ts:launch', 'validator exited before rpc', {
+      exitCode: this.child.exitCode,
+      tail: readTail(logPath),
+    })
+    // #endregion
     throw new ChainError(`The local validator exited before ${this.rpc} accepted requests. See .local-solana/validator.log.`)
   }
 
@@ -234,20 +259,65 @@ function readMints(path: string): MintFile | null {
   return parsed
 }
 
+const freshLedger = join(dirname(fileURLToPath(import.meta.url)), '../chain/fresh-ledger')
+
+/**
+ * Agave 4.3.1's new-ledger check opens a directory with File::open. On Windows
+ * that returns os error 5, so --reset never finishes. A ledger that already
+ * contains vote-account-keypair.json skips that check.
+ */
+function prepareLedger(directory: string): { ledger: string; reset: boolean } {
+  const ledger = join(directory, 'ledger')
+  if (process.platform !== 'win32') return { ledger, reset: true }
+  const vote = join(freshLedger, 'vote-account-keypair.json')
+  if (!existsSync(vote)) {
+    throw new ChainError('The Windows ledger template at chain/fresh-ledger is missing. Reinstall the server checkout.')
+  }
+  rmSync(ledger, { recursive: true, force: true })
+  cpSync(freshLedger, ledger, { recursive: true })
+  rmSync(join(ledger, 'rocksdb', 'LOCK'), { force: true })
+  return { ledger, reset: false }
+}
+
 function findValidator(): string | null {
+  const names = process.platform === 'win32'
+    ? ['solana-test-validator.exe', 'solana-test-validator']
+    : ['solana-test-validator']
   const candidates = [
     process.env.SOLANA_TEST_VALIDATOR,
-    join(homedir(), '.local/share/solana/install/active_release/bin/solana-test-validator'),
+    ...names.map((name) => join(homedir(), '.local/share/solana/install/active_release/bin', name)),
   ].filter((item): item is string => Boolean(item))
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
   }
-  try {
-    const found = execFileSync('which', ['solana-test-validator'], { encoding: 'utf8' }).trim()
-    return found || null
-  } catch {
-    return null
+  const locator = process.platform === 'win32' ? 'where.exe' : 'which'
+  for (const name of names) {
+    try {
+      const found = execFileSync(locator, [name], { encoding: 'utf8' })
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean)
+      if (found && existsSync(found)) return found
+    } catch {
+      // try the next name
+    }
   }
+  return null
+}
+
+function readTail(path: string): string {
+  try {
+    const text = readFileSync(path, 'utf8')
+    return text.slice(-500)
+  } catch {
+    return ''
+  }
+}
+
+function debugLog(hypothesisId: string, location: string, message: string, data: Record<string, unknown>): void {
+  // #region agent log
+  fetch('http://127.0.0.1:7748/ingest/915e487c-8a5b-406d-b678-18f32daeae4b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7e57ff'},body:JSON.stringify({sessionId:'7e57ff',runId:'post-fix',hypothesisId,location,message,data,timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
 }
 
 function delay(ms: number): Promise<void> {

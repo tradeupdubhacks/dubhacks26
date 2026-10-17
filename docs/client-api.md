@@ -192,7 +192,8 @@ Liveness for the page's connection badge.
 {
   "ok": true,
   "mode": "localhost",
-  "execution": "fake"
+  "execution": "solana",
+  "chain": { "rpc": "http://127.0.0.1:8899", "ready": true, "pool": "<pubkey>" }
 }
 ```
 
@@ -200,7 +201,8 @@ Liveness for the page's connection badge.
 | --- | --- | --- |
 | `ok` | boolean | Process is serving. |
 | `mode` | `"localhost"` | Always this value. |
-| `execution` | `"fake"` | Always this value. Fills are not real orders. |
+| `execution` | `"solana"` or `"fake"` | `"solana"` when this process settles live fills on the local validator. `"fake"` when no chain is attached. |
+| `chain` | object | Present when `execution` is `"solana"`. `ready` is true once the local validator accepts requests. |
 
 **Use cases**
 

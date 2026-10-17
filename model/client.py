@@ -54,9 +54,9 @@ class ModelClient:
 
     def health(self) -> dict:
         body = self.request("GET", "/v1/health")
-        if body.get("execution") != "fake":
+        if body.get("execution") not in ("fake", "solana"):
             raise RuntimeError(
-                "Refusing to trade because GET /v1/health execution is not 'fake'."
+                "Refusing to trade because GET /v1/health execution is not 'fake' or 'solana'."
             )
         return body
 
