@@ -62,14 +62,17 @@ def within_rate_limit(sent_at: list[float], now: float, additional: int, limit: 
 
 
 class IdSource:
-    def __init__(self) -> None:
+    """The server caches every clientOrderId it has seen, so a reconnect needs a new prefix."""
+
+    def __init__(self, prefix: str = "bot") -> None:
+        self.prefix = prefix
         self.used: set[str] = set()
         self._n = 0
 
     def next_id(self) -> str:
         while True:
             self._n += 1
-            client_order_id = f"bot-{self._n}"
+            client_order_id = f"{self.prefix}-{self._n}"
             if client_order_id not in self.used:
                 self.used.add(client_order_id)
                 return client_order_id
@@ -189,8 +192,9 @@ def decide(
             for order in open_orders
             if order.get("side") == side and order.get("type") == "post_only" and order.get("price") == price
         ]
+        # Keep one quote per side. Extras come from orders placed on a stale snapshot.
         for order in open_orders:
-            if order.get("side") == side and order not in resting:
+            if order.get("side") == side and order not in resting[:1]:
                 decision.cancels.append(order["clientOrderId"])
         if not resting and 1 <= limits.max_order_lots:
             decision.orders.append(
