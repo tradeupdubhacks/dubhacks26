@@ -1,0 +1,21 @@
+{
+  "source": "local book ticker, because the model API was not reachable",
+  "rows": 80000,
+  "device": "NVIDIA GeForce RTX 4080 Laptop GPU",
+  "splits": {
+    "train_end": 47995,
+    "calibration_start": 48003,
+    "calibration_end": 63993,
+    "test_start": 64001,
+    "test_end": 79992,
+    "horizon": 8
+  },
+  "threshold": 0.99,
+  "threshold_note": "No taker threshold beat a flat book after the 5 bps fee, so the saved threshold refuses IOC crosses. Passive post-only quotes still run.",
+  "held_out_return_after_taker_fee": 0.0,
+  "held_out_trades": 0,
+  "flat_return": 0.0,
+  "window": "BTCUSDT book ticker 2026-10-01, strided. One recorded day, not a live trading result.",
+  "baseline": "Separate HftBacktest join-the-touch equity after fees on the same day: -905.417836. That number is not a fill from this bot or from the model API.",
+  "note": "Held-out return sums signed mid moves after a 5 bps taker fee when the signal trades. Flat does nothing and returns 0. Fees inside a model-API reward must not be subtracted again. This is not evidence of a profitable strategy."
+}
