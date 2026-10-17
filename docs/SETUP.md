@@ -1,0 +1,68 @@
+# Run the server
+
+One process serves the model API, the user API, and the page. Live fills settle on a local Solana validator. Training stays in memory and does not send transactions.
+
+Commands below are run from `dubhacks26/`.
+
+## Install
+
+1. **Node.js 20 or newer** and npm.
+
+2. **JavaScript dependencies**
+
+   ```bash
+   npm install
+   ```
+
+3. **Agave Solana CLI**, which provides `solana-test-validator`. The server starts that validator itself when port `8899` is free.
+
+   ```bash
+   curl -sSfL https://release.anza.xyz/stable/install | sh
+   export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+   ```
+
+   The installer also adds that `PATH` line to `~/.profile` and `~/.bash_profile`. Open a new shell, or run the `export` line, before the first start.
+
+The BTC replay files are already in `hft/data/raw/` (`BTCUSDT_20261001_book_ticker.csv.gz` and `BTCUSDT_20261001_trades.csv.gz`). A live `SOL-USD` session reads a public mid from Binance, then Jupiter, then Coinbase, so that machine needs outbound HTTPS.
+
+## Start
+
+```bash
+npm start
+```
+
+The HTTP server listens on `http://127.0.0.1:3000`. On startup it launches `solana-test-validator` at `http://127.0.0.1:8899` and creates two dummy token accounts under `.local-solana/`. The first start can take about half a minute. Validator logs go to `.local-solana/validator.log`.
+
+Check that the chain is up:
+
+```bash
+curl -s http://127.0.0.1:3000/v1/health
+```
+
+`execution` should be `"solana"` and `chain.ready` should be `true`. If the validator binary is missing, the HTTP server still starts, but `POST /v1/session` returns `503`.
+
+Optional environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP and WebSocket port |
+| `HOST` | `0.0.0.0` | Bind address |
+| `SOLANA_RPC` | `http://127.0.0.1:8899` | Validator the gateway settles against |
+| `SOLANA_TEST_VALIDATOR` | the Agave install path | Validator binary, if it is not in the default location |
+
+`npm run dev` is the same server with file reload.
+
+## Frontend
+
+Open `http://127.0.0.1:3000/`. The page is served by this process. It can open a session, watch the stake, and stop. It cannot place orders.
+
+A session is a deposit of `$1` to `$100` pooled with a `$1000` house fund, plus a floor and a ceiling. While it is running, `ws://127.0.0.1:3000/v1/watch` pushes the stake, book, and fills. The full request shapes are in [docs/client-api.md](docs/client-api.md).
+
+## Model
+
+Point the model at `http://127.0.0.1:3000`. There is no API key.
+
+- **Training**, with no page session open: `POST /v1/reset`, then `POST /v1/step`. These do not send Solana transactions.
+- **Live trading**, after the page has created a session: `POST /v1/orders` and `ws://127.0.0.1:3000/v1/stream`. Each fill is an SPL token transfer on the local validator. The fill's `signature` is that transaction.
+
+`POST /v1/reset` returns `409` while a live session exists. Stop the session from the page first. The full request shapes are in [docs/model-api.md](docs/model-api.md).
