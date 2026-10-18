@@ -64,7 +64,7 @@ export const schemas = {
       stakeCents: { type: ['integer', 'null'] },
       floorCents: { type: ['integer', 'null'] },
       ceilingCents: { type: ['integer', 'null'] },
-      strategy: { enum: ['fast', 'safe', null] },
+      strategy: { enum: ['hft', 'network', 'transformer', 'small', null] },
       step: { type: 'integer' },
       done: { type: 'boolean' },
     },

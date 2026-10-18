@@ -19,9 +19,10 @@ export interface BotModel {
   instruments: string[]
 }
 
-/** What app.ts needs: follow the session, report the choices, change the choice. */
+/** What app.ts needs: follow the sessions, report the choices, change the default choice. */
 export interface BotControl {
-  sync: (session: SessionLike) => void
+  /** Every live session (or one, as before). Starts the models they need and stops the rest. */
+  sync: (sessions: SessionLike | SessionLike[]) => void
   stop: () => void
   info: () => BotInfo
   select: (id: string) => boolean
@@ -29,8 +30,11 @@ export interface BotControl {
 
 export interface BotInfo {
   enabled: boolean
+  /** The model a session gets when it does not name one. */
   selected: string
   running: boolean
+  /** Models with a bot process up, one per model however many sessions it trades. */
+  runningModels?: string[]
   models: Array<Pick<BotModel, 'id' | 'label' | 'description' | 'instruments'>>
 }
 
@@ -54,26 +58,31 @@ export interface BotOptions {
 export interface SessionLike {
   status?: string
   instrument?: string
+  /** The model this session asked for (its `strategy`). Without one, the selected model. */
+  strategy?: string
 }
 
+/**
+ * One bot process per model that has a running session. Several people can trade at once, each with
+ * the model they chose, so a model's process (a supervisor, see model/live.py) trades every session
+ * tagged with its id and stops when its last session ends.
+ */
 export class BotRunner implements BotControl {
-  private child: ChildProcess | null = null
+  private children = new Map<string, { child: ChildProcess; startedAt: number }>()
+  private history = new Map<string, { lastExit: number; failedStarts: number }>()
   private selected: string
-  private lastSession: SessionLike = {}
-  private startedAt = 0
-  private lastExit = 0
-  private failedStarts = 0
+  private lastSessions: SessionLike[] = []
 
   constructor(private readonly options: BotOptions) {
     this.selected = options.models.some((m) => m.id === options.selected) ? options.selected : options.models[0]?.id ?? ''
   }
 
   get running(): boolean {
-    return this.child !== null
+    return this.children.size > 0
   }
 
-  private get model(): BotModel | undefined {
-    return this.options.models.find((m) => m.id === this.selected)
+  private model(id: string): BotModel | undefined {
+    return this.options.models.find((m) => m.id === id)
   }
 
   info(): BotInfo {
@@ -81,80 +90,99 @@ export class BotRunner implements BotControl {
       enabled: true,
       selected: this.selected,
       running: this.running,
+      runningModels: [...this.children.keys()],
       models: this.options.models.map(({ id, label, description, instruments }) => ({ id, label, description, instruments })),
     }
   }
 
-  /** Choose the model for this and later sessions. A bot that is already trading is replaced at once. Returns false for an unknown id. */
+  /**
+   * Choose the model for sessions that do not name one. Those switch at once; sessions that named
+   * a model keep it. Returns false for an unknown id.
+   */
   select(id: string): boolean {
     if (!this.options.models.some((m) => m.id === id)) return false
     if (id !== this.selected) {
       this.selected = id
-      this.stop()
-      this.sync(this.lastSession)
+      this.sync(this.lastSessions)
     }
     return true
   }
 
-  /** Call whenever the session changes. Idempotent. */
-  sync(session: SessionLike): void {
-    this.lastSession = session
-    const model = this.model
-    const wanted = session.status === 'running' && !!model && model.args.length > 0 && model.instruments.includes(session.instrument ?? '')
-    if (wanted) this.start()
-    else this.stop()
+  /** Call whenever a session changes. Idempotent. */
+  sync(sessions: SessionLike | SessionLike[]): void {
+    const list = Array.isArray(sessions) ? sessions : [sessions]
+    this.lastSessions = list
+    const wanted = new Set<string>()
+    for (const session of list) {
+      if (session.status !== 'running') continue
+      const id = session.strategy ?? this.selected
+      const model = this.model(id)
+      if (model && model.args.length > 0 && model.instruments.includes(session.instrument ?? '')) wanted.add(id)
+    }
+    for (const model of this.options.models) {
+      if (!wanted.has(model.id)) this.stopModel(model.id)
+    }
+    for (const id of wanted) this.start(id)
   }
 
-  start(): void {
-    const model = this.model
-    if (this.child || !model || model.args.length === 0) return
+  /** Start the model's bot, or the selected model's when no id is given. */
+  start(id: string = this.selected): void {
+    const model = this.model(id)
+    if (this.children.has(id) || !model || model.args.length === 0) return
     const now = (this.options.now ?? Date.now)()
-    const max = this.options.maxFailedStarts ?? 3
-    if (this.failedStarts >= max) return
-    if (this.lastExit && now - this.lastExit < (this.options.retryDelayMs ?? 5_000)) return
+    const past = this.history.get(id) ?? { lastExit: 0, failedStarts: 0 }
+    if (past.failedStarts >= (this.options.maxFailedStarts ?? 3)) return
+    if (past.lastExit && now - past.lastExit < (this.options.retryDelayMs ?? 5_000)) return
     const log = this.options.log ?? (() => {})
     const child = spawn(this.options.command, model.args, {
       cwd: this.options.cwd,
       env: { ...process.env, ...this.options.env, ...model.env, MODEL_API_URL: this.options.url, PYTHONUNBUFFERED: '1', MODEL_BOT_CHILD: '1' },
       stdio: ['ignore', 'inherit', 'inherit'],
     })
-    this.child = child
-    this.startedAt = now
+    this.children.set(id, { child, startedAt: now })
     log(`model bot '${model.id}' started (pid ${child.pid}): ${this.options.command} ${model.args.join(' ')}`)
     child.on('error', (error) => {
-      log(`model bot could not start: ${error.message}`)
-      if (this.child === child) this.exited(child)
+      log(`model bot '${model.id}' could not start: ${error.message}`)
+      this.exited(id, child)
     })
     child.on('exit', (code, signal) => {
-      if (this.child !== child) return
-      log(`model bot exited (${signal ?? code})`)
-      this.exited(child)
+      if (this.children.get(id)?.child !== child) return
+      log(`model bot '${model.id}' exited (${signal ?? code})`)
+      this.exited(id, child)
     })
   }
 
+  /** Stop every model's bot. */
   stop(): void {
-    this.failedStarts = 0
-    this.lastExit = 0
-    const child = this.child
-    if (!child) return
-    this.child = null
-    child.kill('SIGTERM')
-    this.options.log?.(`model bot stopped (pid ${child.pid})`)
+    for (const model of this.options.models) this.stopModel(model.id)
   }
 
-  private exited(child: ChildProcess): void {
-    if (this.child !== child) return
+  /** Stop one model's bot. Its crash count resets, so the next session that needs it starts it fresh. */
+  private stopModel(id: string): void {
+    this.history.delete(id)
+    const entry = this.children.get(id)
+    if (!entry) return
+    this.children.delete(id)
+    entry.child.kill('SIGTERM')
+    this.options.log?.(`model bot '${id}' stopped (pid ${entry.child.pid})`)
+  }
+
+  private exited(id: string, child: ChildProcess): void {
+    const entry = this.children.get(id)
+    if (entry?.child !== child) return
     const now = (this.options.now ?? Date.now)()
-    this.child = null
-    this.lastExit = now
-    if (now - this.startedAt < (this.options.quickExitMs ?? 10_000)) {
-      this.failedStarts += 1
-      if (this.failedStarts >= (this.options.maxFailedStarts ?? 3)) {
-        this.options.log?.('model bot keeps failing, not restarting until the next session')
+    this.children.delete(id)
+    const past = this.history.get(id) ?? { lastExit: 0, failedStarts: 0 }
+    past.lastExit = now
+    if (now - entry.startedAt < (this.options.quickExitMs ?? 10_000)) {
+      past.failedStarts += 1
+      if (past.failedStarts >= (this.options.maxFailedStarts ?? 3)) {
+        this.options.log?.(`model bot '${id}' keeps failing, not restarting until its next session`)
       }
     } else {
-      this.failedStarts = 0
+      past.failedStarts = 0
     }
+    this.history.set(id, past)
   }
 }
 

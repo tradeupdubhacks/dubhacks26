@@ -92,7 +92,10 @@ describe('model bot process', () => {
     const seen: string[] = []
     let selected = 'a'
     const bot = {
-      sync: (s: { status?: string; instrument?: string }) => seen.push(`${s.status}:${s.instrument ?? ''}`),
+      // The app reports every live session at once (several people can trade).
+      sync: (sessions: Array<{ status?: string; instrument?: string }> | { status?: string; instrument?: string }) => {
+        for (const s of Array.isArray(sessions) ? sessions : [sessions]) seen.push(`${s.status}:${s.instrument ?? ''}`)
+      },
       stop: () => seen.push('closed'),
       info: () => ({ enabled: true, selected, running: false, models: [{ id: 'a', label: 'A', description: '', instruments: ['BTC-USDT'] }, { id: 'b', label: 'B', description: '', instruments: ['BTC-USDT'] }] }),
       select: (id: string) => (['a', 'b'].includes(id) ? ((selected = id), true) : false),
@@ -112,6 +115,44 @@ describe('model bot process', () => {
     assert.ok(seen.includes('running:SOL-USD'), seen.join(','))
     assert.ok(seen.includes('halted:SOL-USD'), seen.join(','))
     assert.equal(seen.at(-1), 'closed')
+  })
+
+  it('runs one bot per model that has a running session, for several sessions at once', async () => {
+    const { bot, logs } = runner([model('a', sleeper), model('b', sleeper), model('none', [], [])])
+    const a1 = { status: 'running', instrument: 'BTC-USDT', strategy: 'a' }
+    const a2 = { status: 'running', instrument: 'BTC-USDT', strategy: 'a' }
+    const b1 = { status: 'running', instrument: 'BTC-USDT', strategy: 'b' }
+    bot.sync([a1, a2, b1])
+    assert.deepEqual(bot.info().runningModels?.sort(), ['a', 'b'])
+    assert.equal(logs.filter((m) => m.includes("'a' started")).length, 1)   // one process for both 'a' sessions
+    bot.sync([a1, a2, { ...b1, status: 'halted' }])
+    assert.deepEqual(bot.info().runningModels, ['a'])
+    bot.sync([{ ...a1, status: 'halted' }, a2])
+    assert.deepEqual(bot.info().runningModels, ['a'])                      // a2 still needs it
+    assert.equal(bot.select('b'), true)                                     // a session that named 'a' keeps it
+    assert.deepEqual(bot.info().runningModels, ['a'])
+    bot.sync([])
+    assert.equal(bot.running, false)
+    bot.stop()
+  })
+
+  it('tells the launcher about every session, each with its own model', async () => {
+    const calls: Array<Array<{ sessionId?: string; strategy?: string; status?: string }>> = []
+    const bot = {
+      sync: (sessions: unknown) => { calls.push(sessions as Array<{ sessionId?: string; strategy?: string; status?: string }>) },
+      stop: () => {},
+      info: () => ({ enabled: true, selected: 'transformer', running: false, models: [] }),
+      select: () => true,
+    }
+    const built = await buildApp({ clock: false, bot })
+    const open = (payload: object) => built.app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 500, instrument: 'SOL-USD', floorCents: 250, ceilingCents: 800, ...payload } })
+    const first = (await open({ strategy: 'hft' })).json()
+    const second = (await open({})).json()                                     // names no model: gets the selected one
+    assert.equal(first.strategy, 'hft')
+    assert.equal(second.strategy, 'transformer')
+    const last = calls.at(-1)!
+    assert.deepEqual(last.map((s) => [s.sessionId, s.strategy, s.status]), [[first.sessionId, 'hft', 'running'], [second.sessionId, 'transformer', 'running']])
+    await built.close()
   })
 
   it('reports a disabled bot cleanly when the server runs without one', async () => {

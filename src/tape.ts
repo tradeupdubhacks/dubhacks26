@@ -28,6 +28,10 @@ export interface LiveBtcSource extends BtcSource {
   readonly stale: boolean
   /** Up to `count` samples of the book, one per 200ms, oldest first. */
   history(count: number): TopOfBook[]
+  /** A view with its own trade cursor, for one of several sessions reading this feed. */
+  view?(): LiveBtcSource
+  /** Stop delivering trades to this view. */
+  release?(): void
 }
 
 interface BookRow {

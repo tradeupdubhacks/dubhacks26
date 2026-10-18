@@ -7,10 +7,13 @@ Both are goal-seeking policies for a live user session (see session_policy.py). 
 from __future__ import annotations
 
 import asyncio
+import builtins
+import functools
 import json
 import os
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 import torch
@@ -98,11 +101,12 @@ def orphaned() -> bool:
     return os.environ.get("MODEL_BOT_CHILD") == "1" and os.getppid() == 1
 
 
-def prime(stream: TickStream, client: ModelClient) -> int:
+def prime(stream: TickStream, client: ModelClient, session_id: str | None = None) -> int:
     """Fill the transformer's 30 s window from GET /v1/bars (the server's recent 200 ms bars; at a session's open that is the 2-minute
     pre-roll), so it can trade at once instead of after 31 s. Returns the number of bars loaded; 0 when the endpoint is unavailable."""
     try:
-        bars = client.request("GET", "/v1/bars?limit=601").get("bars") or []
+        path = "/v1/bars?limit=601" + (f"&sessionId={urllib.parse.quote(session_id)}" if session_id else "")
+        bars = client.request("GET", path).get("bars") or []
     except Exception as error:
         print(f"could not load history ({error}); warming up from live snapshots instead")
         return 0
@@ -113,8 +117,12 @@ def prime(stream: TickStream, client: ModelClient) -> int:
     return len(bars)
 
 
-async def session(base_url: str, policy: str = "session") -> None:
-    client = ModelClient(base_url)
+async def session(base_url: str, policy: str = "session", session_id: str | None = None) -> None:
+    """Trade one session. With `session_id` (from the supervisor in model/live.py), only that session,
+    returning once it halts. Without one, the server's latest session, as before."""
+    # Tag every line with the session, since one bot now trades several at once.
+    print = functools.partial(builtins.print, f"[{session_id}]", flush=True) if session_id else builtins.print  # noqa: A001
+    client = ModelClient(base_url, session_id=session_id)
     client.health()
     catalog = {item["symbol"]: item for item in client.instruments()["instruments"]}
     if policy == "transformer":
@@ -177,7 +185,7 @@ async def session(base_url: str, policy: str = "session") -> None:
                 continue                              # both session models are trained on BTC top of book only
             if policy == "transformer" and not primed:
                 primed = True
-                loaded = prime(stream, client)
+                loaded = prime(stream, client, session_id)
                 print(f"loaded {loaded} history bars, ready to trade at once" if loaded else "no history, warming up")
             view = inflight.view(observation, now)
             features = session_features(view)
@@ -191,6 +199,8 @@ async def session(base_url: str, policy: str = "session") -> None:
                 if not halted:
                     print("session halted, not sending orders")
                     halted = True
+                if session_id:
+                    return
                 continue
             halted = False
             if decision.reason in ("no_session", "empty_book") and not decision.orders:

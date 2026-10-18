@@ -117,13 +117,16 @@ export interface TradePrint {
 }
 
 /**
- * Which bot trades a live session. `fast` is the rule-based high-frequency bot
- * (model/hft.py): quicker, bigger swings. `safe` is the trained model (model/live.py):
- * trades only when its forecast and the order book agree.
+ * Which model trades a live session. The ids are the models in src/bot.ts (BOT_MODELS):
+ * `hft` the rule-based high-frequency bot (model/hft.py, "Faster"), `network` the team network with the
+ * hybrid policy (model/live.py, "Slower"), and the session models `transformer` and `small`
+ * (model/live_session.py). Each model's bot trades only the sessions tagged with its id.
  */
-export type Strategy = 'fast' | 'safe'
-export const STRATEGIES: readonly Strategy[] = ['fast', 'safe']
-export const DEFAULT_STRATEGY: Strategy = 'safe'
+export type Strategy = 'hft' | 'network' | 'transformer' | 'small'
+export const STRATEGIES: readonly Strategy[] = ['hft', 'network', 'transformer', 'small']
+/** Names from before the model ids. POST /v1/session still accepts them. */
+export const STRATEGY_ALIASES: Readonly<Record<string, Strategy>> = { fast: 'hft', safe: 'network' }
+export const DEFAULT_STRATEGY: Strategy = 'network'
 export const DEFAULT_INSTRUMENT: InstrumentSymbol = 'BTC-USDT'
 
 export interface Observation {

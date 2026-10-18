@@ -64,12 +64,25 @@ let market = {
 // Every session trades Bitcoin. The user picks which bot runs it; the server tags the
 // session with the strategy, and each bot trades only its own sessions.
 const TRADE_SYMBOL = 'BTC-USDT';
-// fast: the rule-based high-frequency bot (model/hft.py). safe: the trained model.
-const STRATEGIES = [
-  { id: 'fast', name: 'Faster', tag: 'high risk', tagClass: 'high' },
-  { id: 'safe', name: 'Slower', tag: 'low risk', tagClass: 'low' },
+// The models a session can use. The ids are the server's model ids (GET /v1/bot); the page shows
+// one card per model the server offers, in this order, with these names and risk tags.
+const STRATEGY_CARDS = [
+  { id: 'hft', name: 'Faster', tag: 'high risk', tagClass: 'high' },          // model/hft.py, the rule bot
+  { id: 'network', name: 'Slower', tag: 'low risk', tagClass: 'low' },        // the team network, hybrid policy
+  { id: 'transformer', name: 'Transformer', tag: 'medium risk', tagClass: 'medium' }, // model/live_session.py
+  { id: 'small', name: 'Small network', tag: 'rarely trades', tagClass: 'pending' },  // model/live_session.py
 ];
-const strategyOf = id => STRATEGIES.find(x => x.id === id) || STRATEGIES[1];
+const DEFAULT_STRATEGY = 'network';
+// Older saved choices: the first two cards' ids, and the model dropdown's.
+const STRATEGY_ALIASES = { fast: 'hft', safe: 'network' };
+/** The cards to show: the models the server can run for Bitcoin, or every card when it runs no bot. */
+function strategies() {
+  if (!botInfo || !botInfo.enabled) return STRATEGY_CARDS;
+  const offered = new Set(botInfo.models.filter(m => m.instruments.includes(TRADE_SYMBOL)).map(m => m.id));
+  const shown = STRATEGY_CARDS.filter(x => offered.has(x.id));
+  return shown.length ? shown : STRATEGY_CARDS;
+}
+const strategyOf = id => STRATEGY_CARDS.find(x => x.id === (STRATEGY_ALIASES[id] || id)) || STRATEGY_CARDS[1];
 
 /* ============================================================
    FAKE HISTORY GENERATION (seeded so charts stay stable)
@@ -198,7 +211,7 @@ function refreshHistoryUI() {
    ============================================================ */
 const defaultState = () => ({
   cart: {},                 // productId -> qty
-  trade: { symbol: TRADE_SYMBOL, strategy: 'safe', amount: null, maxLoss: 20, target: 5, hours: 0, minutes: 0 },
+  trade: { symbol: TRADE_SYMBOL, strategy: DEFAULT_STRATEGY, amount: null, maxLoss: 20, target: 5, hours: 0, minutes: 0 },
   runs: [],                 // finished trading sessions for this order
   active: null,             // the trading session running right now
   ended: false,             // true once END SESSION is confirmed
@@ -352,7 +365,9 @@ function ensureTradeDefaults() {
   if (t.amount == null) t.amount = Math.min(Math.max(Math.round(cartTotalC() * 0.10), min), max) / 100;
   else if (Math.round(t.amount * 100) > max) t.amount = max / 100;
   t.symbol = market.instruments.some(i => i.symbol === TRADE_SYMBOL) ? TRADE_SYMBOL : market.instruments[0].symbol;
-  if (!STRATEGIES.some(x => x.id === t.strategy)) t.strategy = 'safe';
+  if (STRATEGY_ALIASES[t.strategy]) t.strategy = STRATEGY_ALIASES[t.strategy];
+  if (!t.strategy && t.model) t.strategy = t.model;                          // a choice made in the old model dropdown
+  if (!strategies().some(x => x.id === t.strategy)) t.strategy = DEFAULT_STRATEGY;
 }
 
 function validateTrade() {
@@ -509,12 +524,12 @@ function renderTrading() {
           <div class="card">
             <h3>Choose a strategy</h3>
             <div class="crypto-list">
-              ${STRATEGIES.map(x => `
+              ${strategies().map(x => `
                 <button class="crypto-item strategy-item ${x.id === t.strategy ? 'active' : ''}" data-action="select-strategy" data-id="${esc(x.id)}">
                   <span class="strategy-head"><strong>${esc(x.name)}</strong> <span class="tag ${x.tagClass}">${esc(x.tag)}</span></span>
                 </button>`).join('')}
             </div>
-            <span class="hint" style="margin-bottom:12px">Both strategies trade Bitcoin (BTC).</span>
+            <span class="hint" style="margin-bottom:12px">Every strategy trades Bitcoin (BTC).</span>
             <label class="field">Initial investment
               <div class="input-prefix"><span>$</span>
                 <input type="number" id="f-amount" data-field="amount" min="${minC / 100}" max="${maxC / 100}" step="0.01" value="${num(t.amount)}">
@@ -554,7 +569,7 @@ function renderTrading() {
 
           <div class="card">
             <h3>Trading parameters</h3>
-            <div class="params">${modelFieldHTML()}
+            <div class="params">
               <label class="field">Max loss: <span id="v-maxLoss">${t.maxLoss}%</span> of investment
                 <input type="range" min="5" max="100" step="5" value="${t.maxLoss}" data-field="maxLoss">
                 <span class="hint">Trading stops automatically if you lose this much.</span>
@@ -753,8 +768,8 @@ async function startTrading() {
   const d = derived(), t = state.trade;
   startBusy = true; setStartError(''); updateSummary();
   try {
-    const m = chosenModel();
-    if (m) await api('/v1/bot', { method: 'POST', body: JSON.stringify({ model: m.id }) });
+    // The session names its own model (each person picks theirs), so the page no longer changes
+    // the server-wide default with POST /v1/bot.
     const s = await api('/v1/session', {
       method: 'POST',
       body: JSON.stringify({ depositCents: d.depositC, instrument: t.symbol, strategy: t.strategy, floorCents: d.floorC, ceilingCents: d.ceilingC }),
@@ -770,7 +785,8 @@ async function startTrading() {
     openLiveModal(); connectWatch(); scheduleDuration();
   } catch (e) {
     if (e.code === 'offline') setStartError(`Can't reach the trading server at ${esc(API_BASE)}. Make sure it's running, then try again.`);
-    else if (e.code === 'session_running') setStartError('A trading session is already running on the server. <button class="link-btn" data-action="force-stop">Stop it and try again</button>');
+    else if (e.code === 'too_many_sessions') setStartError('The trading desk is full right now. Try again in a few minutes.');
+    else if (e.code === 'feed_unavailable') setStartError('Live Bitcoin prices are not available yet. Try again in a few seconds.');
     else setStartError(esc(e.message));
   } finally {
     startBusy = false; updateSummary();
@@ -1014,7 +1030,9 @@ function drawLive(canvas, pts, o) {
 function connectWatch() {
   closeWatch();
   let ws;
-  try { ws = new WebSocket(WS_BASE + '/v1/watch'); }
+  // Several people can trade at once, so watch only this page's own session.
+  const id = state.active ? state.active.sessionId : '';
+  try { ws = new WebSocket(WS_BASE + '/v1/watch?sessionId=' + encodeURIComponent(id)); }
   catch { live.reconnectTimer = setTimeout(connectWatch, 1500); return; }
   live.ws = ws; live.lastMsg = Date.now();
   ws.onopen = () => { live.connected = true; live.lastMsg = Date.now(); updateLive(); };
@@ -1022,6 +1040,7 @@ function connectWatch() {
     live.lastMsg = Date.now();
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if ((m.type === 'snapshot' || m.type === 'halt') && m.session) onSession(m.session);
+    else if (m.type === 'error' && m.error && m.error.code === 'unknown_session') lostSession();
   };
   ws.onclose = () => {
     if (live.ws !== ws) return;
@@ -1092,7 +1111,7 @@ async function endTrading(why = 'manual') {
   if (!state.active || live.stopping) return;
   live.stopping = true; live.stopWhy = why; setLiveError(''); updateLive();
   try {
-    finalizeRun(await api('/v1/stop', { method: 'POST' }));
+    finalizeRun(await api('/v1/stop', { method: 'POST', body: JSON.stringify({ sessionId: state.active.sessionId }) }));
   } catch (e) {
     live.stopping = false; live.stopWhy = null;
     if (e.code === 'no_session') { lostSession(); return; }
@@ -1135,10 +1154,6 @@ const actions = {
     updateSummary();
   },
   'start-trading': () => startTrading(),
-  'force-stop': async () => {
-    try { await api('/v1/stop', { method: 'POST' }); setStartError('Stopped the old session. Press Start trading again.'); }
-    catch (e) { setStartError(esc(e.message)); }
-  },
   'end-trading': () => endTrading('manual'),
   'close-live': () => closeLive(),
   'end-session': () => { if (!state.active) openEndConfirm(); },

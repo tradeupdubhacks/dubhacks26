@@ -74,36 +74,24 @@ On Windows, PyTorch also needs the Microsoft Visual C++ Redistributable (`https:
 
 `POST /v1/reset` returns `409` while a live session exists. Stop the session from the page first. The full request shapes are in [docs/model-api.md](docs/model-api.md).
 
-### Running both strategies
+### Models and several users
 
-The page lets the user pick a strategy for each Bitcoin session. The server tags the session with it, and each bot trades only its own:
+Each person picks a model for their own session on the page. The session is tagged with the model's id, and that model's bot trades only sessions with its id:
 
-| Page option | `strategy` | Bot |
+| Page card | `strategy` | Bot |
 | --- | --- | --- |
-| Fast, higher risk | `fast` | `BOT_STRATEGY=hft python -m model.live` (`model/hft.py`) |
-| Steady, lower risk | `safe` | `python -m model.live` (the trained model, `MODEL_POLICY=hybrid`) |
+| Faster, high risk | `hft` | `model/hft.py`, the rule bot (`BOT_STRATEGY=hft python -m model.live`) |
+| Slower, low risk | `network` | the team network with the hybrid policy (`python -m model.live`) |
+| Transformer, medium risk | `transformer` | `python -m model.live transformer` (`model/live_session.py`, [TRANSFORMER.md](../model/TRANSFORMER.md)) |
+| Small network, rarely trades | `small` | `python -m model.live session` ([SESSION_MODEL.md](../model/SESSION_MODEL.md)) |
 
-Run both bots at the same time, next to the server:
+`POST /v1/session` still accepts the older names `fast` (for `hft`) and `safe` (for `network`).
 
-```bash
-FEE_MODEL=solana USE_CHAIN=1 npm start
-python -m model.live                     # trades safe sessions
-BOT_STRATEGY=hft python -m model.live    # trades fast sessions
-```
+**Starting the bots.** The server starts them itself (`src/bot.ts`). Each model's bot process starts when the first running session needs that model, and stops when its last session ends. One process per model trades all of that model's sessions, one task per session.
 
-Each bot ignores a session that belongs to the other strategy, so the two never trade the same session. Both were tuned with `FEE_MODEL=solana`.
+- `MODEL_BOT=off` starts nothing. You then run the commands in the table yourself; each one also trades only its own model's sessions.
+- `GET /v1/bot` lists the models.
+- `POST /v1/bot {"model": "..."}` sets the default for a session that names no model (`MODEL_BOT_KIND`, default `transformer`). It does not change sessions that already chose a model.
 
-### Live Bitcoin prices
+**Limits.** Up to 20 sessions trade at once. Each one is separate: its own stake, floor, ceiling, and model. All the models were tuned with `FEE_MODEL=solana`.
 
-By default (`BTC_FEED=live`), a live `BTC-USDT` session uses the live Binance USD-M BTCUSDT book: best bid and ask with sizes, plus trades, over the public websocket (`wss://fstream.binance.com`). This is the same feed the recorded tape and the bots' tuning data came from.
-
-- Fills still settle on the local Solana validator.
-- The server samples the feed every 200ms from startup and hands each new session the last two minutes as bar history.
-- Until two minutes have passed since startup, `Slower` waits for its window to fill.
-- If the feed goes quiet for 5 seconds, `priceSource` becomes `stale` and the bots stop sending orders.
-- `POST /v1/session` returns `503 feed_unavailable` before the first price arrives.
-- `POST /v1/step` is refused on a live-feed session (`409 step_not_for_live_feed`).
-
-`BTC_FEED=tape` replays the recorded 2026-10-01 tape for live sessions instead. Training (`POST /v1/reset`) always uses the tape.
-
-Binance's REST API refuses some regions. The websocket stream worked from the machine this was built on.

@@ -21,6 +21,7 @@ import {
   DEFAULT_STRATEGY,
   SETTLEMENT_SIGNATURES,
   STRATEGIES,
+  STRATEGY_ALIASES,
   SOLANA_LAMPORTS_PER_SIGNATURE,
   STAKE_HISTORY,
   TAKER_BPS,
@@ -447,7 +448,8 @@ export class Market {
     })
   }
 
-  openSession(input: Record<string, unknown>): Promise<{ ok: true; session: SessionView } | Failure> {
+  /** `id` comes from the gateway, which numbers sessions across every market it runs. */
+  openSession(input: Record<string, unknown>, id?: string): Promise<{ ok: true; session: SessionView } | Failure> {
     return this.run(async () => {
       if (this.mode === 'live' && !this.halted) {
         return failure(409, 'session_running', 'A session is already running. Stop it before starting another.')
@@ -463,7 +465,8 @@ export class Market {
         return failure(400, 'unknown_instrument', 'Instrument is not available.')
       }
       const inst = instrumentOf(symbol)!
-      const strategy = input.strategy === undefined ? DEFAULT_STRATEGY : input.strategy
+      const named = input.strategy === undefined ? DEFAULT_STRATEGY : input.strategy
+      const strategy = typeof named === 'string' ? (STRATEGY_ALIASES[named] ?? named) : named
       if (typeof strategy !== 'string' || !STRATEGIES.includes(strategy as Strategy)) {
         return failure(400, 'bad_strategy', `Strategy must be one of: ${STRATEGIES.join(', ')}.`)
       }
@@ -499,7 +502,7 @@ export class Market {
         if (sol) this.solCents = sol.cents
       }
       this.session = {
-        id: `sess_${++this.sessionSeq}`,
+        id: id ?? `sess_${++this.sessionSeq}`,
         strategy: strategy as Strategy,
         deposit,
         floor,
