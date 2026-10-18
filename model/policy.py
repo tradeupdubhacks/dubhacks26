@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 TAKER_BPS = 5
 MAKER_BPS = 2
 SHOCK_BPS = 50
-TARGET_CAP = 10
 WIDE_SPREAD_BPS = 5.0
 
 
@@ -59,7 +58,7 @@ def shock_budget_cents(price: int, size: int) -> int:
 
 
 def lots_that_fit(price: int, room_cents: int, limit: int) -> int:
-    cap = max(0, min(limit, TARGET_CAP))
+    cap = max(0, limit)
     best = 0
     for size in range(1, cap + 1):
         if shock_budget_cents(price, size) < room_cents:
@@ -70,7 +69,7 @@ def lots_that_fit(price: int, room_cents: int, limit: int) -> int:
 
 
 def rail_capacity(observation: dict, price: int, limits: InstrumentLimits) -> int:
-    hard = min(limits.max_position_lots, TARGET_CAP)
+    hard = limits.max_position_lots
     stake = observation.get("stakeCents")
     if stake is None or price <= 0:
         return hard
@@ -135,16 +134,22 @@ def aggressive_price(side: str, bid: int, ask: int, tick: int) -> int:
 
 
 def entry_lots(expected_bps: float, enter_bps: float, capacity: int) -> int:
-    if capacity < 1 or enter_bps <= 0:
+    """Use the whole stake, not a one-lot probe."""
+    if capacity < 1 or enter_bps <= 0 or abs(expected_bps) < enter_bps:
         return 0
-    multiple = abs(expected_bps) / enter_bps
-    if multiple < 1.5:
-        size = 1
-    elif multiple < 2.5:
-        size = min(4, capacity)
-    else:
-        size = capacity
-    return max(1, min(size, capacity))
+    return capacity
+
+
+def deploy_lots(observation: dict, price: int, limits: InstrumentLimits) -> int:
+    """Lots whose notional matches the stake, capped by the rails and the instrument."""
+    allowed = rail_capacity(observation, price, limits)
+    if allowed < 1 or price <= 0:
+        return 0
+    stake = observation.get("stakeCents")
+    if stake is None:
+        return allowed
+    target = max(1, int(int(stake) * 1000 / price))
+    return max(1, min(target, allowed, limits.max_order_lots, limits.max_position_lots))
 
 
 def desired_lots(
@@ -157,7 +162,7 @@ def desired_lots(
     capacity: int,
 ) -> int:
     """Target inventory. An open trade is held for the forecast horizon so fees are not paid twice."""
-    cap = max(0, min(capacity, TARGET_CAP))
+    cap = max(0, capacity)
     if cap < 1:
         return 0
     if position != 0 and 0 <= held_bars < horizon_bars:
@@ -221,7 +226,7 @@ def decide(
     bid, ask = book
     mid = int(observation.get("mid") or (bid + ask) // 2)
     position = int(observation.get("positionLots") or 0)
-    capacity = rail_capacity(observation, mid, limits)
+    capacity = deploy_lots(observation, mid, limits)
     if capacity < 1 and position == 0 and not _open_orders(observation):
         return Decision(reason="near_rail")
     if capacity < 1:

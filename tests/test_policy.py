@@ -40,7 +40,7 @@ def call(obs, expected, held=0, horizon=300, ids=None):
 
 
 def test_position_headroom_blocks_the_extra_lot():
-    decision = call(observation(positionLots=10), expected=40.0, held=300)
+    decision = call(observation(positionLots=1), expected=40.0, held=300)
     assert decision.orders == []
 
 

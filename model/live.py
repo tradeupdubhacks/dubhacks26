@@ -15,7 +15,7 @@ from model.score import Scorer
 
 # Documented in docs/model-api.md. The client instrument payload does not repeat them.
 DOCUMENTED_LIMITS = {
-    "BTC-USDT": (10, 10),
+    "BTC-USDT": (100_000, 100_000),
     "SOL-USD": (2000, 10000),
 }
 
@@ -201,13 +201,15 @@ async def session(base_url: str) -> None:
                 entry_ts = ts
             last_sign = sign
             held = 0 if entry_ts is None else max(0, (ts - entry_ts) // scorer.bar_ms)
+            # Hold at least an hour so a stake-sized position is not closed on every wiggle.
+            horizon = max(scorer.horizon_bars, 18_000)
             decision = decide(
                 view,
                 limits,
                 expected,
                 scorer.enter_bps,
                 scorer.exit_bps,
-                scorer.horizon_bars,
+                horizon,
                 held,
                 ids,
             )

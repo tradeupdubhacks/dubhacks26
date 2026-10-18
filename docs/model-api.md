@@ -46,8 +46,8 @@ Latency: an accepted order waits `50ms` of **market** time before it can match. 
 | Data in training | The same tape, advanced only by `step` | Synthetic mid and counterparty quotes. No public HTTP calls |
 | `priceTickCents` | `10` | `1` |
 | Lot | `0.001` BTC | `0.001` SOL |
-| `maxOrderLots` | `10` | `2000` |
-| `maxPositionLots` | `10` | `10000` |
+| `maxOrderLots` | `100000` | `2000` |
+| `maxPositionLots` | `100000` | `10000` |
 | Orders per `1000ms` of market time | `20` | `20` |
 
 The rate limit counts accepted `place` requests, not cancels and not duplicate ids. The 21st new id inside the window is rejected with `rate_limit`. Training that sends one order per `100ms` step stays under the limit. A burst of 21 different ids in one step does not.
@@ -425,7 +425,7 @@ A live `BTC-USDT` session accepts `step`. That is how a demo can move the tape f
 - Reuse an id after cancel. Still a duplicate of the canceled ack. Choose a new id.
 - Self-trade. Rest a sell, then send a market buy that would hit it. The sell is canceled. The buy fills against the next seller if there is one. There is no fill whose two sides are both the pool.
 - Rate limit. Twenty-one new limit ids in one step, each size `1`, priced so they would rest. The first twenty ack. The twenty-first is `rate_limit`.
-- Position limit. On `BTC-USDT`, `maxPositionLots` is `10`. An order that would make `11` is `position_limit` and is not queued.
+- Position limit. On `BTC-USDT`, `maxPositionLots` is `100000`. An order that would push the signed position past that, counting resting and pending lots, is `position_limit` and is not queued.
 - Bad tick. BTC price `6000001` is `bad_tick` because the tick is `10` cents.
 - Market order with a price. `price_forbidden`, and the clock does not move because shape checks run first.
 - Read `reward` while flat and before any fill. On a step that only replays tape, a flat position has `reward` of `0` even if `mid` changes.

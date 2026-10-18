@@ -361,7 +361,7 @@ describe('order lifecycle', () => {
       payload: {
         dtMs: 100,
         orders: [
-          { clientOrderId: 'big', side: 'buy', size: 10, type: 'limit', price: 10 },
+          { clientOrderId: 'big', side: 'buy', size: 100_000, type: 'limit', price: 10 },
           { clientOrderId: 'over', side: 'buy', size: 1, type: 'limit', price: 10 },
         ],
       },
