@@ -19,3 +19,34 @@ The page owns the time limit and calls `POST /v1/stop`. The bot reads the floor 
 A `BTC-USDT` lot is `0.001` BTC, about `$83` of notional. The bot will not add a lot when a 50 bp move plus the flatten fee would cross the floor or the ceiling. A `$5` deposit clears that check. The order is still one or more full lots, so a `$5` account can lose the whole deposit on a much smaller price move than the notional.
 
 The live loop tracks its own in-flight places and cancels from the `events` replies, decides at most every `100ms`, and uses a new `clientOrderId` prefix on every connection, because the server remembers every id it has seen. With no session open it pings every `5s` and prints `waiting for a live session` instead of reconnecting.
+
+## Choosing the bot
+
+`BOT_STRATEGY` picks which bot `python -m model.live` runs. Leaving it unset is the same as `model`.
+
+| `BOT_STRATEGY` | Bot |
+| --- | --- |
+| `model` (default) | The trained network in `model/score.py` and `model/policy.py`. |
+| `hft` | A rule-based high-frequency bot in `model/hft.py`. It uses no model. |
+
+```text
+FEE_MODEL=solana USE_CHAIN=1 npm start   # server: charge only the Solana network fee
+BOT_STRATEGY=hft python -m model.live    # high-frequency rule bot
+python -m model.live                     # back to the model
+```
+
+The server's `FEE_MODEL` flag sets what a fill costs:
+
+- `exchange` (default): Phoenix-style fees, 2 bps maker and 5 bps taker.
+- `solana`: no exchange fee. Each fill pays the network fee of its settlement transaction, two 5,000-lamport signatures priced at the SOL mid (about 0.1 cents). Cash is kept in whole cents, so fractions of a cent carry over to later fills.
+
+`GET /v1/instruments` reports the active model under `fees`.
+
+The `hft` bot holds one long position at a time:
+
+- **Buy** when flat and the mid ticks down from the last mid it saw, with an IOC at the ask.
+- **Sell** the whole position with an IOC at the bid, as soon as the sale (after its fee) returns more than the buy cost (including its fee) plus `HFT_MIN_PROFIT_CENTS` (default `0`).
+
+The Solana fee is per transaction, not per dollar, so size decides how small a move pays. The bot trades enough lots that one price tick covers a round trip's fees `HFT_TICK_COVER` times (default `2`): about 40 BTC lots, or about 400 SOL lots. Size is capped at `HFT_MAX_LEVERAGE` times the stake (default `50`). `HFT_LOTS` sets a fixed size instead. Under the exchange fee model no size lets one tick pay, so the bot trades one lot.
+
+There is no stop-loss. The session floor is the only downside limit.

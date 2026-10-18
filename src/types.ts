@@ -69,6 +69,17 @@ export function feeCents(notional: number, bps: number): number {
   return Math.floor((notional * bps) / 10_000)
 }
 
+/**
+ * How fills are charged. `exchange` is the Phoenix-style maker/taker fee in basis points.
+ * `solana` charges no exchange fee, only the network fee of the fill's settlement
+ * transaction: two signatures (pool and counterparty) at the 5,000-lamport base fee.
+ */
+export type FeeModel = 'exchange' | 'solana'
+export const FEE_MODELS: readonly FeeModel[] = ['exchange', 'solana']
+export const SOLANA_LAMPORTS_PER_SIGNATURE = 5_000
+export const SETTLEMENT_SIGNATURES = 2
+export const LAMPORTS_PER_SOL = 1_000_000_000
+
 export interface BookLevel {
   price: number
   size: number

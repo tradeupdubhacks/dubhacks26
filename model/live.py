@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 
 import websockets
@@ -280,10 +281,27 @@ async def session(base_url: str) -> None:
                 await _send(socket, decision, sent_at, inflight, view)
 
 
+STRATEGIES = ("model", "hft")
+
+
+def strategy() -> str:
+    """Feature flag. BOT_STRATEGY=model (default) runs the network, BOT_STRATEGY=hft runs model/hft.py."""
+    name = os.environ.get("BOT_STRATEGY", "model").strip().lower() or "model"
+    if name not in STRATEGIES:
+        raise SystemExit(f"Unknown BOT_STRATEGY {name!r}. Use one of: {', '.join(STRATEGIES)}.")
+    return name
+
+
 async def run(base_url: str = "http://127.0.0.1:3000") -> None:
+    name = strategy()
+    if name == "hft":
+        from model.hft import session as run_session
+    else:
+        run_session = session
+    print(f"strategy: {name}")
     while True:
         try:
-            await session(base_url)
+            await run_session(base_url)
         except SystemExit:
             raise
         except Exception as error:
