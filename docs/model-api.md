@@ -32,7 +32,7 @@ Two ways to run, and they do not overlap:
 
 `BTC-USDT` tick is `10` cents. `SOL-USD` tick is `1` cent. Notional cents of a fill is `round(price * size / 1000)`.
 
-Fees on every instrument: `2` bps maker, `5` bps taker, rounded down to a cent on the fill notional.
+Fees on every instrument: set by the `MAKER_BPS` and `TAKER_BPS` environment variables of the server, **`0` by default (off)**, rounded down to a cent on the fill notional. Binance's regular-user futures rates are `2` bps maker and `5` bps taker; start the server with `MAKER_BPS=2 TAKER_BPS=5` to charge them. `GET /v1/instruments` reports the rates in force.
 
 Latency: an accepted order waits `50ms` of **market** time before it can match. A `step` with `dtMs: 10` leaves it `pending`. A later step that carries the clock past `50ms` releases it. On a live session the wall clock releases it. Flatten, halt, and a user Stop skip this delay.
 

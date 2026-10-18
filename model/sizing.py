@@ -8,10 +8,12 @@ All money is integer cents, all size is lots (0.001 BTC), matching docs/model-ap
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
-TAKER_BPS = 5.0
-MAKER_BPS = 2.0
+# Fee rates in bps. They must match the server (src/types.ts); the server passes its own MAKER_BPS / TAKER_BPS to the bot.
+TAKER_BPS = float(os.environ.get("TAKER_BPS", "0"))
+MAKER_BPS = float(os.environ.get("MAKER_BPS", "0"))
 SLIPPAGE_BPS = 0.5      # entry and stop crossing allowance beyond the quoted touch
 
 

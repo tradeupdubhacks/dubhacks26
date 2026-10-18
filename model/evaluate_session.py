@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from model import backtest
+from model import backtest, sizing
 from model.backtest import Tape, run_session
 from model.session_policy import SessionParams
 from model.train_session import ARTIFACTS, CACHE, HOUR, summarize
@@ -56,6 +56,9 @@ def stats(outcomes, hours, deposit, boots=400, seed=0):
 
 
 def main() -> None:
+    # The reported results use Binance's regular-user rates; the platform default is now 0 (see src/types.ts).
+    sizing.TAKER_BPS, sizing.MAKER_BPS = 5.0, 2.0
+    backtest.FEES.update(taker=5.0, maker=2.0)
     tape = Tape()
     feats = np.load(CACHE)
     scores = np.load(CACHE.with_name("session_scores.npy"))

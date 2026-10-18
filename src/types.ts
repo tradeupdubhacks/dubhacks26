@@ -1,8 +1,14 @@
 export const HOUSE_CENTS = 100_000
 export const DEPOSIT_MIN = 100
 export const DEPOSIT_MAX = 10_000
-export const MAKER_BPS = 2
-export const TAKER_BPS = 5
+// Trading fees, in basis points of each fill's notional. OFF (0) by default. Binance's regular-user futures rates are
+// MAKER_BPS=2 TAKER_BPS=5; set those environment variables to bring them back. The bot is started with the same values.
+function feeBps(name: string): number {
+  const value = Number(process.env[name] ?? 0)
+  return Number.isFinite(value) && value >= 0 ? value : 0
+}
+export const MAKER_BPS = feeBps('MAKER_BPS')
+export const TAKER_BPS = feeBps('TAKER_BPS')
 export const LATENCY_MS = 50
 export const RATE_LIMIT = 20
 export const RATE_WINDOW_MS = 1_000

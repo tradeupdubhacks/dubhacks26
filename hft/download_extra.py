@@ -2,6 +2,9 @@
 
     python download_extra.py            # klines for 6 symbols + one BTCUSDT top-of-book day per month
     python download_extra.py klines     # only the 1-minute klines (~1 GB)
+    python download_extra.py aggtrades  # trade-by-trade data (aggTrades) for the same 10 top-of-book days (~0.4 GB)
+    python download_extra.py coins      # daily metrics (open interest, long/short ratios) for ETH, SOL, BNB, XRP, DOGE (~0.1 GB)
+    python download_extra.py research   # BTCUSDT metrics (open interest, long/short ratios), bookDepth, basis, funding, spot klines (~1 GB)
 
 Files go to data/ext/ (git-ignored) and are checked against the published SHA-256 .CHECKSUM files.
 Top-of-book (bookTicker) is only published from 2023-05 to 2024-04; each day is ~90 MB zipped.
@@ -78,8 +81,53 @@ def book_tickers() -> list[tuple[str, Path]]:
              OUT / "bookTicker" / f"BTCUSDT-bookTicker-{d}.zip") for d in BOOK_DAYS]
 
 
+def agg_trades() -> list[tuple[str, Path]]:
+    return [(f"{BASE}/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-{d}.zip",
+             OUT / "aggTrades" / f"BTCUSDT-aggTrades-{d}.zip") for d in BOOK_DAYS]
+
+
+def research_extras() -> list[tuple[str, Path]]:
+    """Information that is not in the price series: positioning, depth, basis, funding, spot."""
+    from datetime import date, timedelta
+    items = []
+    day, end = date(2020, 9, 1), date(2026, 10, 15)
+    while day <= end:
+        d = day.isoformat()
+        items.append((f"{BASE}/daily/metrics/BTCUSDT/BTCUSDT-metrics-{d}.zip", OUT / "metrics" / f"BTCUSDT-metrics-{d}.zip"))
+        if day >= date(2023, 1, 1):
+            items.append((f"{BASE}/daily/bookDepth/BTCUSDT/BTCUSDT-bookDepth-{d}.zip", OUT / "bookDepth" / f"BTCUSDT-bookDepth-{d}.zip"))
+        day += timedelta(days=1)
+    y, m = 2020, 1
+    while (y, m) <= LAST:
+        ym = f"{y}-{m:02d}"
+        items.append((f"{BASE}/monthly/premiumIndexKlines/BTCUSDT/1m/BTCUSDT-1m-{ym}.zip", OUT / "premium" / f"BTCUSDT-1m-{ym}.zip"))
+        items.append((f"{BASE}/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-{ym}.zip", OUT / "funding" / f"BTCUSDT-fundingRate-{ym}.zip"))
+        items.append((f"https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-{ym}.zip", OUT / "spot" / f"BTCUSDT-1m-{ym}.zip"))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return items
+
+
+def coin_metrics() -> list[tuple[str, Path]]:
+    from datetime import date, timedelta
+    items = []
+    for symbol in SYMBOLS[1:]:
+        day = date(*FIRST.get(symbol, (2020, 9))[:2], 1) if symbol in FIRST else date(2020, 9, 1)
+        while day <= date(2026, 10, 15):
+            d = day.isoformat()
+            items.append((f"{BASE}/daily/metrics/{symbol}/{symbol}-metrics-{d}.zip", OUT / "metrics_coins" / symbol / f"{symbol}-metrics-{d}.zip"))
+            day += timedelta(days=1)
+    return items
+
+
 if __name__ == "__main__":
-    items = klines() + ([] if sys.argv[1:] == ["klines"] else book_tickers())
-    with ThreadPoolExecutor(6) as pool:
+    if sys.argv[1:] == ["coins"]:
+        items = coin_metrics()
+    elif sys.argv[1:] == ["research"]:
+        items = research_extras()
+    elif sys.argv[1:] == ["aggtrades"]:
+        items = agg_trades()
+    else:
+        items = klines() + ([] if sys.argv[1:] == ["klines"] else book_tickers())
+    with ThreadPoolExecutor(8) as pool:
         for line in pool.map(job, items):
             print(line, flush=True)

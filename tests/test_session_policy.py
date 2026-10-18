@@ -39,8 +39,27 @@ def test_plan_never_risks_more_than_the_floor_margin():
     assert plan.max_loss_cents <= 10_000 - 9_800
 
 
-def test_plan_refuses_when_take_profit_does_not_cover_fees():
+def test_plan_refuses_when_take_profit_does_not_cover_fees(monkeypatch):
+    import model.sizing as sizing
+    monkeypatch.setattr(sizing, "TAKER_BPS", 5.0)
+    monkeypatch.setattr(sizing, "MAKER_BPS", 2.0)
     assert plan_trade(10_000, 9_800, 10_100, 8_400_000, 10, 6, 6) is None
+
+
+def test_plan_accepts_a_small_take_profit_when_fees_are_off(monkeypatch):
+    import model.sizing as sizing
+    monkeypatch.setattr(sizing, "TAKER_BPS", 0.0)
+    monkeypatch.setattr(sizing, "MAKER_BPS", 0.0)
+    plan = plan_trade(10_000, 9_800, 10_100, 8_400_000, 10, 6, 6)
+    assert plan is not None and plan.lots >= 1
+
+
+def test_no_take_profit_sizes_for_the_largest_position_and_places_no_limit_order():
+    params = SessionParams(take_profit_bps=0, stop_bps=25, sizing_bps=1.0)
+    d = decide_session(observation(), BTC, 0.9, session_features(observation()), params, SessionState(), IdSource())
+    assert d.reason == "entry" and d.orders[0]["size"] >= 5                      # sized to the rails, not to a distant target
+    held = decide_session(observation(positionLots=5, unrealizedPnlCents=0), BTC, 0.9, [0.0] * 11, params, SessionState(), IdSource())
+    assert held.reason == "hold" and not held.orders                              # and no resting take-profit
 
 
 def test_plan_refuses_at_the_floor():

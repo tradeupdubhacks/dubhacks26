@@ -1,0 +1,6 @@
+test_year,rule,train_net_maker,train_events,test_events,test_gross,test_net_maker,test_net_taker,btc_events,btc_gross
+2022,reversal win240m |z|>=4.0 hold240m,285.99,204,117,53.23,49.23,42.23,24,-27.47
+2023,reversal win240m |z|>=3.0 hold60m,34.47,2351,914,3.24,-0.76,-7.76,185,2.73
+2024,reversal win240m |z|>=3.0 hold60m,24.61,3265,788,15.1,11.1,4.1,173,5.2
+2025,reversal win240m |z|>=4.0 hold240m,137.06,576,144,-18.81,-22.81,-29.81,31,0.91
+2026,reversal win240m |z|>=4.0 hold60m,60.79,1083,143,-9.71,-13.71,-20.71,25,-20.94

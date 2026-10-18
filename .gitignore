@@ -11,3 +11,4 @@ hft/data/out/*grid50ms.npz
 hft/data/out/session_*.npy
 hft/research/klines_*.npz
 hft/research/bars_1s.csv.gz
+hft/research/results/*.pkl

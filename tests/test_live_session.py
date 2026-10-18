@@ -97,3 +97,15 @@ def test_halted_and_foreign_markets_send_nothing(monkeypatch):
 def test_the_old_quoting_scorer_still_loads_with_four_features():
     score, threshold = live.load_scorer()
     assert 0.0 <= score([0.1, 0.0, 1e-4, 0.0]) <= 1.0
+
+
+def test_session_profiles_idle_uses_the_artifact_and_active_trades_more(monkeypatch):
+    idle_score, idle = live.load_session_model(profile="idle")
+    active_score, active = live.load_session_model(profile="active")
+    assert idle.threshold > 0.7 and active.threshold == 0.30
+    assert 0.0 <= active_score([0.0] * 11) <= 1.0
+    monkeypatch.setenv("MODEL_PROFILE", "idle")
+    assert live.load_session_model()[1].threshold == idle.threshold
+    monkeypatch.setenv("MODEL_PROFILE", "nonsense")
+    with pytest.raises(SystemExit):
+        live.load_session_model()

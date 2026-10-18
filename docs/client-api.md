@@ -226,7 +226,7 @@ The instrument picker and the legal ranges for the session form.
 {
   "houseFundCents": 100000,
   "deposit": { "minCents": 100, "maxCents": 10000 },
-  "fees": { "makerBps": 2, "takerBps": 5 },
+  "fees": { "makerBps": 0, "takerBps": 0 },
   "instruments": [
     {
       "symbol": "BTC-USDT",

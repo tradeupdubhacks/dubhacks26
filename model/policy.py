@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
-TAKER_BPS = 5
-MAKER_BPS = 2
+# Must match the server's fees (src/types.ts, 0 unless MAKER_BPS / TAKER_BPS are set).
+TAKER_BPS = float(os.environ.get("TAKER_BPS", "0"))
+MAKER_BPS = float(os.environ.get("MAKER_BPS", "0"))
 
 
 @dataclass

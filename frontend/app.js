@@ -284,11 +284,44 @@ async function loadMarket() {
   } finally { loadingMarket = false; }
 }
 
+// The trading models the server can start for a session (GET /v1/bot). null until loaded, or when the server runs without a bot.
+let botInfo = null;
+async function loadBotInfo() {
+  try { botInfo = await api('/v1/bot'); } catch { botInfo = null; }
+  refreshHistoryUI();
+}
+function chosenModel() {
+  if (!botInfo || !botInfo.enabled) return null;
+  const id = state.trade.model;
+  return botInfo.models.find(m => m.id === id) || botInfo.models.find(m => m.id === botInfo.selected) || botInfo.models[0] || null;
+}
+function modelHint() {
+  const m = chosenModel();
+  if (!m) return '';
+  if (!m.instruments.length) return m.description;
+  const sym = state.trade.symbol;
+  return m.instruments.includes(sym)
+    ? m.description
+    : `${m.description} It does not trade ${sym.split('-')[0]}, so nothing will trade this session. Pick another model or coin.`;
+}
+function modelFieldHTML() {
+  if (!botInfo || !botInfo.enabled || !botInfo.models.length) return '';
+  const cur = chosenModel();
+  return `
+              <label class="field">Trading model
+                <select data-field="model">
+                  ${botInfo.models.map(m => `<option value="${esc(m.id)}" ${cur && m.id === cur.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}
+                </select>
+                <span class="hint" id="model-hint">${esc(modelHint())}</span>
+              </label>`;
+}
+
 async function checkHealth() {
   try {
     await api('/v1/health');
     setOnline(true);
     if (!market.loaded) await loadMarket();
+    if (!botInfo) await loadBotInfo();
   } catch { setOnline(false); }
 }
 
@@ -441,7 +474,9 @@ function renderTrading() {
   const notes = [
     ...c.notes,
     c.data === 'replay' ? 'Prices replay recorded market data.' : 'Follows the live market price.',
-    `Fees of ${pct(f.makerBps / 10000, 2)} to ${pct(f.takerBps / 10000, 2)} per trade are already included in your results.`,
+    f.makerBps || f.takerBps
+      ? `Fees of ${pct(f.makerBps / 10000, 2)} to ${pct(f.takerBps / 10000, 2)} per trade are already included in your results.`
+      : 'Trading fees are switched off in this demo.',
   ];
 
   app.innerHTML = `
@@ -507,7 +542,7 @@ function renderTrading() {
 
           <div class="card">
             <h3>Trading parameters</h3>
-            <div class="params">
+            <div class="params">${modelFieldHTML()}
               <label class="field">Max loss: <span id="v-maxLoss">${t.maxLoss}%</span> of investment
                 <input type="range" min="5" max="100" step="5" value="${t.maxLoss}" data-field="maxLoss">
                 <span class="hint">Trading stops automatically if you lose this much.</span>
@@ -699,6 +734,8 @@ async function startTrading() {
   const d = derived(), t = state.trade;
   startBusy = true; setStartError(''); updateSummary();
   try {
+    const m = chosenModel();
+    if (m) await api('/v1/bot', { method: 'POST', body: JSON.stringify({ model: m.id }) });
     const s = await api('/v1/session', {
       method: 'POST',
       body: JSON.stringify({ depositCents: d.depositC, instrument: t.symbol, floorCents: d.floorC, ceilingCents: d.ceilingC }),
@@ -950,6 +987,7 @@ document.addEventListener('input', e => {
   else if (field === 'maxLoss') { t.maxLoss = Number(raw); setText('v-maxLoss', t.maxLoss + '%'); }
   else if (field === 'hours') t.hours = Number(raw || 0);
   else if (field === 'minutes') t.minutes = Number(raw || 0);
+  else if (field === 'model') { t.model = raw; setText('model-hint', modelHint()); }
   save();
   updateSummary();
 });

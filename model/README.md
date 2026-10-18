@@ -25,3 +25,7 @@ The live loop tracks its own in-flight places and cancels from the `events` repl
 `python -m model.live session` runs a goal-seeking policy for a live user session (reach the ceiling, protect the floor)
 instead of join-the-touch quoting. Inputs, outputs, sizing, results and limits are in [SESSION_MODEL.md](SESSION_MODEL.md).
 Train with `python -m model.tape_grid && python -m model.train_session && python -m model.evaluate_session`.
+
+## Transformer
+
+`python -m model.live transformer` (or the page's Trading model dropdown) runs the tick transformer. See [TRANSFORMER.md](TRANSFORMER.md).

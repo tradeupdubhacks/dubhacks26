@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import websocket from '@fastify/websocket'
 import Fastify, { type FastifyInstance } from 'fastify'
+import type { BotControl } from './bot.js'
 import type { Chain } from './chain.js'
 import { Market, instrumentsBody, type Failure } from './market.js'
 
@@ -33,6 +34,8 @@ export async function buildApp(options?: {
   clock?: boolean
   chain?: Chain | null
   historyFetch?: typeof fetch
+  /** Starts and stops the model process as sessions open and end (see bot.ts). */
+  bot?: BotControl | null
 }): Promise<App> {
   const market = new Market(options?.tapeDir ?? join(root, 'hft', 'data', 'raw'), options?.chain ?? null)
   const app = Fastify({ logger: options?.logger ?? false })
@@ -57,6 +60,7 @@ export async function buildApp(options?: {
     const type = halted && !sawHalt ? 'halt' : 'snapshot'
     sawHalt = halted
     if (!('status' in session) || session.status === 'idle') sawHalt = false
+    options?.bot?.sync(session)
     const watchPayload = JSON.stringify({ type, session })
     for (const socket of watchers) send(socket, watchPayload)
     if (market.liveOpen) {
@@ -147,6 +151,16 @@ export async function buildApp(options?: {
   for (const [name, type] of assets) {
     app.get(`/${name}`, async (_request, reply) => reply.type(type).send(await readFile(join(root, 'frontend', name))))
   }
+
+  // Which model the server starts for a BTC session. The page lists the choices and sets one before it opens a session.
+  app.get('/v1/bot', async () => options?.bot?.info() ?? { enabled: false, selected: 'none', running: false, models: [] })
+  app.post('/v1/bot', async (request, reply) => {
+    const body = bodyOf(request.body)
+    const model = typeof body.model === 'string' ? body.model : ''
+    if (!options?.bot) return reply.code(409).send({ error: { code: 'bot_disabled', message: 'The server was started with MODEL_BOT=off.' } })
+    if (!options.bot.select(model)) return reply.code(400).send({ error: { code: 'unknown_model', message: 'Unknown model id.' } })
+    return options.bot.info()
+  })
 
   app.get('/v1/health', async () => ({
     ok: true,
@@ -341,6 +355,7 @@ export async function buildApp(options?: {
   app.addHook('onClose', async () => {
     if (clock) clearInterval(clock)
     if (feed) clearInterval(feed)
+    options?.bot?.stop()
     await market.close()
     await options?.chain?.close()
   })

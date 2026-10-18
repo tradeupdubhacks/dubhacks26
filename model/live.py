@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from model.features_session import session_features
 from model.net import SignalNet
 from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
 from model.session_policy import SessionParams, SessionState, decide_session
+from model.sizing import MAKER_BPS, TAKER_BPS
+from model.transformer_signal import TickStream, TransformerScorer
 
 ARTIFACTS = Path(__file__).resolve().parent / "artifacts" / "signal.pt"
 SESSION_ARTIFACT = Path(__file__).resolve().parent / "artifacts" / "session_signal.pt"
@@ -42,13 +45,45 @@ def load_scorer(path: Path = ARTIFACTS):
     return score, threshold
 
 
-def load_session_model(path: Path = SESSION_ARTIFACT):
-    """Scorer and policy parameters for the goal-seeking session policy (python -m model.train_session)."""
+# "idle" uses the parameters saved in the artifact, which were calibrated to trade only when confidence is
+# extreme; on the held-out day that is almost never (confidence peaks near 0.73, the threshold is 0.74), so the
+# stake stays flat. "active" trades whenever confidence is above 0.30. On the held-out hours it makes about 18
+# trades per session and loses money on average (fees and a tiny edge); see model/SESSION_MODEL.md.
+PROFILES = {
+    "idle": None,
+    "active": dict(take_profit_bps=25, stop_bps=25, max_hold_steps=3000, cooldown_steps=25, threshold=0.30, vol_gate=0.0),
+}
+
+
+def load_session_model(path: Path = SESSION_ARTIFACT, profile: str | None = None):
+    """Scorer and policy parameters for the goal-seeking session policy (python -m model.train_session).
+
+    The profile comes from MODEL_PROFILE (default "active"): "idle" keeps the artifact's own parameters."""
     if not path.exists():
         raise SystemExit(f"Missing {path}. Run python -m model.train_session first.")
+    profile = profile or os.environ.get("MODEL_PROFILE", "active")
+    if profile not in PROFILES:
+        raise SystemExit(f"Unknown MODEL_PROFILE {profile!r}. Use one of: {', '.join(PROFILES)}.")
     score, _threshold = load_scorer(path)
     blob = torch.load(path, map_location="cpu", weights_only=False)
-    return score, SessionParams(**blob["session_params"])
+    params = SessionParams(**(PROFILES[profile] or blob["session_params"]))
+    print(f"session model profile: {profile} (entry threshold {params.threshold:.2f}, take-profit/stop {params.take_profit_bps:g}/{params.stop_bps:g} bps)")
+    return score, params
+
+
+def load_transformer_model():
+    """The tick transformer and its short-hold policy: enter on a confident 5 s forecast, flatten after about 5 s.
+
+    Entry confidence is |prediction| / scale, so the threshold is the one that selected the top 10 % of ticks on the validation day.
+    There is no take-profit; the trade ends at the hold limit (25 ticks = 5 s) or a 25 bps stop. Sizing aims for the largest position the
+    rails allow, so `sizing_bps` is just above the fees."""
+    scorer = TransformerScorer()
+    params = SessionParams(
+        take_profit_bps=0, stop_bps=25, max_hold_steps=25, cooldown_steps=5, threshold=scorer.entry_threshold,
+        vol_gate=0.0, sizing_bps=TAKER_BPS + MAKER_BPS + 1.0,
+    )
+    print(f"transformer loaded (entry confidence {params.threshold:.2f}, hold {params.max_hold_steps * 0.2:.0f}s, stop {params.stop_bps:g} bps)")
+    return scorer, params
 
 
 # Documented in docs/model-api.md. The client instrument payload does not repeat them.
@@ -161,6 +196,11 @@ async def session(base_url: str, policy: str = "quote") -> None:
         score_of, params = load_session_model()
         threshold = params.threshold
         states: dict[str, SessionState] = {}
+    elif policy == "transformer":
+        scorer, params = load_transformer_model()
+        stream = TickStream()
+        threshold = params.threshold
+        states = {}
     else:
         score_of, threshold = load_scorer()
     # The server remembers every id, including ones from an earlier connection.
@@ -210,11 +250,15 @@ async def session(base_url: str, policy: str = "quote") -> None:
             if limits is None:
                 continue
             view = inflight.view(observation, now)
-            if policy == "session":
+            if policy in ("session", "transformer"):
                 if symbol != "BTC-USDT":
-                    continue                      # the session model is trained on the BTC replay only
+                    continue                      # both are trained on BTC top of book only
                 features = session_features(view)
-                score = score_of(features) if features is not None else 0.5
+                if policy == "transformer":
+                    stream.update(observation)    # the raw snapshot, not the in-flight view: only the book matters
+                    score = scorer.score(stream)
+                else:
+                    score = score_of(features) if features is not None else 0.5
                 decision = decide_session(
                     view, limits, score, features, params, states.setdefault(symbol, SessionState()), ids
                 )
@@ -252,8 +296,11 @@ async def run(base_url: str = "http://127.0.0.1:3000", policy: str = "quote") ->
 
 def main() -> None:
     """python -m model.live            join-the-touch quoting (signal.pt)
-    python -m model.live session    goal-seeking session policy (session_signal.pt), BTC-USDT only"""
-    asyncio.run(run(policy="session" if "session" in sys.argv[1:] else "quote"))
+    python -m model.live session    goal-seeking session policy (session_signal.pt), BTC-USDT only
+    python -m model.live transformer short-hold transformer policy (transformer_signal.pt), BTC-USDT only"""
+    url = os.environ.get("MODEL_API_URL", "http://127.0.0.1:3000")
+    kind = "transformer" if "transformer" in sys.argv[1:] else "session" if "session" in sys.argv[1:] else "quote"
+    asyncio.run(run(url, policy=kind))
 
 
 if __name__ == "__main__":

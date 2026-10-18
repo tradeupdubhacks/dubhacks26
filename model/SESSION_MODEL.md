@@ -10,6 +10,21 @@ python -m model.evaluate_session # calibrate on 10-14 h, test on 14-24 h, writes
 python -m model.live session     # trade it against the server (BTC-USDT only); `python -m model.live` is unchanged
 ```
 
+## Started by the server
+
+`npm start` launches this model by itself: when a **BTC-USDT** session opens (the page's Start trading, or `POST /v1/session`) the server
+runs `python -m model.live session`, and it stops that process when the session halts (floor, ceiling, END SESSION). SOL sessions get no bot,
+since the model is trained on BTC only. The code is `src/bot.ts`, driven from `publish()` in `src/app.ts`.
+
+* Python: `.venv/bin/python` if present, else `python3` (`python` on Windows); override with `MODEL_BOT_PYTHON=/path/to/python`.
+* `MODEL_BOT=off npm start` runs the server without a bot, e.g. to run `python -m model.live` (the quoting model) yourself.
+* A bot that crashes on start is retried at most 3 times per session, 5 s apart, with the reason in the server log.
+* **Profiles** (`MODEL_PROFILE`, default `active`). `idle` uses the parameters saved in the artifact, which only enter at confidence >= 0.74;
+  the model's confidence peaks near 0.73, so on the recorded day it almost never trades and the stake stays flat. `active` enters at confidence >= 0.30
+  (25 bps take-profit and stop). On the held-out hours 14-24, with the page's defaults (+5% goal, -20% loss, $100) it makes about 18 trades per session
+  and the stake falls by about 12% on average (95% interval -15% to -9%); with a +1% goal and -2% loss it reaches the goal in about 20% of sessions
+  and changes the stake by about -1.2%. Fees and a very small edge, not a bug. Use `MODEL_PROFILE=idle` to keep the stake flat.
+
 ## Inputs (one `Observation`, nothing else)
 
 `features_session.session_features(observation)` returns 11 numbers from fields the server already sends:

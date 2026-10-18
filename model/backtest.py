@@ -26,7 +26,9 @@ GRID = Path(__file__).resolve().parent.parent / "hft" / "data" / "out" / "BTCUSD
 SUB = 4                      # 50 ms cells per 200 ms live tick
 TICK = 10
 LIMITS = InstrumentLimits("BTC-USDT", TICK, 10, 10)
-FEES = {"taker": 5.0, "maker": 2.0}      # bps, docs/model-api.md; overridable for diagnostics
+from model.sizing import MAKER_BPS, TAKER_BPS  # noqa: E402
+
+FEES = {"taker": TAKER_BPS, "maker": MAKER_BPS}      # bps, same source as the server (env, 0 by default)
 
 
 def fee_cents(price: int, lots: int, bps: float) -> int:

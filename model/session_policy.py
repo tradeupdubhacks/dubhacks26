@@ -23,6 +23,8 @@ class SessionParams:
     threshold: float = 0.0              # confidence = |p - 0.5| * 2
     vol_gate: float = 0.0               # minimum vol_bps feature
     entry_slip_ticks: int = 2
+    # Take-profit <= 0 means none: the trade ends at the stop or the hold limit. Sizing then uses `sizing_bps` as the target move.
+    sizing_bps: float | None = None
 
 
 TICK_MS = 200                      # the live tick the *_steps parameters are counted in
@@ -85,8 +87,8 @@ def decide_session(
             return Decision(flatten=True, reason="stop")
         if now - state.entry_ts >= (params.max_hold_steps - 1) * TICK_MS:
             return Decision(flatten=True, reason="time")
-        if any(order.get("side") != ("buy" if sign > 0 else "sell") for order in open_orders):
-            return Decision(reason="hold")          # take-profit already working
+        if params.take_profit_bps <= 0 or any(order.get("side") != ("buy" if sign > 0 else "sell") for order in open_orders):
+            return Decision(reason="hold")          # no take-profit wanted, or it is already working
         average = mid - unrealized * 1000.0 / position
         target = average * (1 + sign * params.take_profit_bps / 1e4)
         side = "sell" if sign > 0 else "buy"
@@ -119,7 +121,7 @@ def decide_session(
         return Decision(reason="no_ceiling")
     plan = plan_trade(
         int(stake), floor, int(ceiling), mid,
-        limits.max_position_lots, params.take_profit_bps, params.stop_bps,
+        limits.max_position_lots, params.sizing_bps or params.take_profit_bps, params.stop_bps,
     )
     if plan is None:
         return Decision(reason="no_room")
