@@ -3,6 +3,11 @@
 Orders follow the predicted return. There is no standing quote on both
 sides of the touch: that rule filled just before the price moved against
 it, and the maker fee made the loss larger.
+
+Inventory is built one clip at a time and then held. Selling a long just
+because it had reached one or two lots paid the taker fee on every flip,
+and that flip was the loss. A strong adverse forecast can take one clip
+off. A quiet or bullish forecast adds, up to the rail budget.
 """
 
 from __future__ import annotations
@@ -11,13 +16,19 @@ from dataclasses import dataclass, field
 
 TAKER_BPS = 5
 MAKER_BPS = 2
-SHOCK_BPS = 50
+SHOCK_BPS = 120
 WIDE_SPREAD_BPS = 5.0
-# A quiet book still crosses once per this window. The forecast chooses the side.
+# A quiet book still adds one clip per this window, then the position is held.
 TRADE_EVERY_MS = 5_000
 # The server sits on an order for 50ms. On the BTC tape the touch often moves
 # several dollars in that gap, and a limit at the old ask is canceled.
 LATENCY_CROSS_BPS = 80
+# One buy is about a BTC lot of notional. Cheaper coins use more lots per buy.
+ADD_NOTIONAL_CENTS = 8_000
+# Stake/price used to cap BTC at one or two lots, so the next decision had to sell.
+MAX_ADDS = 16
+# Mild forecasts are noise next to the taker fee. Only a crash forecast scales out.
+HARD_EXIT_BPS = 25.0
 
 
 @dataclass
@@ -53,10 +64,10 @@ def notional_cents(price: int, size: int) -> int:
 
 
 def shock_budget_cents(price: int, size: int) -> int:
-    """Room a new position needs: a 50 bps adverse move plus the taker fee to flatten.
+    """Room a new position needs: a 120 bp adverse move plus the taker fee to flatten.
 
-    One BTC lot is about $84 of notional. Requiring that whole notional as
-    cushion made a $5 stake unable to send any order.
+    One BTC lot is about $84. The cushion is large enough that a $5 stake
+    still fits a few lots, and small enough that those lots survive a normal swing.
     """
     notion = notional_cents(price, max(1, size))
     return notion * SHOCK_BPS // 10_000 + notion * TAKER_BPS // 10_000 + 1
@@ -151,40 +162,42 @@ def aggressive_price(side: str, bid: int, ask: int, tick: int) -> int:
     return max(price, tick)
 
 
-def entry_lots(expected_bps: float, enter_bps: float, capacity: int) -> int:
-    """Use the whole stake, not a one-lot probe."""
+def order_clip(price: int, limits: InstrumentLimits) -> int:
+    """Lots in a single buy. BTC stays at one lot. A cheaper coin buys more lots."""
+    if price <= 0:
+        return 1
+    lots = max(1, (ADD_NOTIONAL_CENTS * 1000) // price)
+    return max(1, min(lots, limits.max_order_lots, limits.max_position_lots))
+
+
+def entry_lots(expected_bps: float, enter_bps: float, capacity: int, step: int = 1) -> int:
+    """One clip. A single order for the whole cap was one buy, and the next decision sold."""
     if capacity < 1 or enter_bps <= 0 or abs(expected_bps) < enter_bps:
         return 0
-    return capacity
+    return max(1, min(capacity, step))
 
 
 def deploy_lots(observation: dict, price: int, limits: InstrumentLimits) -> int:
-    """Lots whose notional matches the stake, capped by the rails and the instrument."""
+    """How many lots the book may hold. The rail sets the risk. The stake price does not."""
     allowed = rail_capacity(observation, price, limits)
     if allowed < 1 or price <= 0:
         return 0
-    stake = observation.get("stakeCents")
-    if stake is None:
-        return allowed
-    target = max(1, int(int(stake) * 1000 / price))
-    return max(1, min(target, allowed, limits.max_order_lots, limits.max_position_lots))
+    step = order_clip(price, limits)
+    adds = min(MAX_ADDS, allowed // step)
+    if adds < 1:
+        return min(allowed, step)
+    return min(adds * step, allowed, limits.max_position_lots)
 
 
-def pace_lots(position: int, capacity: int, expected_bps: float) -> int:
-    """Step one lot with the forecast. At the cap, take one lot off so the next step can trade."""
-    cap = max(1, capacity)
-    if expected_bps > 0:
-        direction = 1
-    elif expected_bps < 0:
-        direction = -1
-    elif position > 0:
-        direction = -1
-    else:
-        direction = 1
-    stepped = position + direction
-    if stepped > cap or stepped < -cap:
-        stepped = position - direction
-    return int(max(-cap, min(cap, stepped)))
+def pace_lots(position: int, capacity: int, expected_bps: float, step: int = 1) -> int:
+    """Add one clip. At the cap, hold. Selling the cap to buy it back was the loss."""
+    cap = max(0, capacity)
+    step = max(1, step)
+    # A tighter rail stops new buys. Selling the position down to the new cap
+    # and buying it back when the stake ticks up is a fee loop.
+    if expected_bps <= -HARD_EXIT_BPS or position >= cap:
+        return position
+    return min(cap, position + step)
 
 
 def desired_lots(
@@ -195,28 +208,21 @@ def desired_lots(
     exit_bps: float,
     horizon_bars: int,
     capacity: int,
+    step: int = 1,
 ) -> int:
-    """Target inventory. An open trade is held for the forecast horizon so fees are not paid twice."""
+    """Target inventory. A long is held. Only a crash forecast, after the horizon, takes a clip off."""
+    del exit_bps  # mild exit levels paid the fee twice; the crash level is HARD_EXIT_BPS
     cap = max(0, capacity)
-    if cap < 1:
-        return 0
+    step = max(1, step)
     if position != 0 and 0 <= held_bars < horizon_bars:
-        return int(max(-cap, min(cap, position)))
-    if expected_bps >= enter_bps:
-        raw = entry_lots(expected_bps, enter_bps, cap)
-    elif expected_bps <= -enter_bps:
-        raw = -entry_lots(expected_bps, enter_bps, cap)
-    elif position > 0 and expected_bps > -exit_bps:
-        raw = min(position, cap)
-    elif position < 0 and expected_bps < exit_bps:
-        raw = max(position, -cap)
-    else:
-        raw = 0
-    if position > 0 and raw > 0:
-        raw = min(position, cap)
-    elif position < 0 and raw < 0:
-        raw = max(position, -cap)
-    return int(max(-cap, min(cap, raw)))
+        return position
+    if position > 0 and expected_bps <= -HARD_EXIT_BPS:
+        return max(0, position - step)
+    if position < 0 and expected_bps >= HARD_EXIT_BPS:
+        return min(0, position + step)
+    if position == 0 and expected_bps >= enter_bps:
+        return entry_lots(expected_bps, enter_bps, cap, step)
+    return position
 
 
 def _best(observation: dict) -> tuple[int, int] | None:
@@ -262,6 +268,7 @@ def decide(
     bid, ask = book
     mid = int(observation.get("mid") or (bid + ask) // 2)
     position = int(observation.get("positionLots") or 0)
+    step = order_clip(mid, limits)
     capacity = deploy_lots(observation, mid, limits)
     if capacity < 1 and position == 0 and not _open_orders(observation):
         return Decision(reason="near_rail")
@@ -279,12 +286,23 @@ def decide(
         desired = position
     else:
         desired = desired_lots(
-            expected_bps, position, held_bars, enter_bps, exit_bps, horizon_bars, capacity
+            expected_bps,
+            position,
+            held_bars,
+            enter_bps,
+            exit_bps,
+            horizon_bars,
+            capacity,
+            step,
         )
+    # A crash scale-out waits for the same 5s clock as a new buy, so a one-bar
+    # forecast cannot dump the position on every snapshot.
+    if desired < position and not due:
+        desired = position
     orders = _open_orders(observation)
     paced = False
     if due and not orders and desired == position and capacity >= 1:
-        nudged = pace_lots(position, capacity, expected_bps)
+        nudged = pace_lots(position, capacity, expected_bps, step)
         if nudged != position:
             desired = nudged
             paced = True

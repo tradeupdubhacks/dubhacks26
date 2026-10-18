@@ -9,7 +9,15 @@ import time
 import websockets
 
 from model.client import ApiError, ModelClient
-from model.policy import TRADE_EVERY_MS, Decision, IdSource, InstrumentLimits, decide, within_rate_limit
+from model.policy import (
+    HARD_EXIT_BPS,
+    TRADE_EVERY_MS,
+    Decision,
+    IdSource,
+    InstrumentLimits,
+    decide,
+    within_rate_limit,
+)
 from model.score import Scorer
 
 
@@ -214,13 +222,13 @@ async def session(base_url: str) -> None:
                     print(f"no bar history ({error.code}), building the window live")
             expected = scorer.update(observation)
             if not scorer.ready and not announced:
-                print("waiting 2 minutes for a price window before sending orders")
+                print("price history is still filling. buys still go out on the 5s pace")
                 announced = True
             elif scorer.ready and not ready_announced:
-                if scorer.enter_bps > 100:
-                    print("price window ready. no forecast cleared the taker fee, so no orders are sent")
-                else:
-                    print(f"price window ready. entry level {scorer.enter_bps:.0f} bps")
+                print(
+                    f"price window ready. adding while the forecast stays above "
+                    f"{-HARD_EXIT_BPS:.0f} bps, then holding"
+                )
                 ready_announced = True
             position = int(observation.get("positionLots") or 0)
             sign = (position > 0) - (position < 0)
@@ -231,10 +239,9 @@ async def session(base_url: str) -> None:
                 entry_ts = ts
             last_sign = sign
             held = 0 if entry_ts is None else max(0, (ts - entry_ts) // scorer.bar_ms)
-            # One BTC lot is the whole stake. Holding that fill for the forecast
-            # horizon (or an hour) is why BTC went as quiet as SOL. A position
-            # may sit for 5s, and the clock starts when the position changes,
-            # so a canceled IOC does not count as a trade.
+            # Each fill starts the 5s clock. The next decision adds another clip
+            # until the rail cap, and then the long is held. A canceled IOC does
+            # not move the position, so it does not reset the clock.
             if seen_position is None:
                 seen_position = position
             elif position != seen_position:
