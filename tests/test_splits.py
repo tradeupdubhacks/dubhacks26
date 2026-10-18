@@ -1,6 +1,6 @@
 import pytest
 
-from model.features import features_from_observation
+from model.features import FEATURE_NAMES, INPUT_DIM, LOOKBACK, features_from_bars
 from model.splits import split_bounds
 
 
@@ -16,15 +16,11 @@ def test_short_sample_is_rejected():
         split_bounds(20, horizon=8)
 
 
-def test_features_use_only_the_observation_payload():
-    observation = {
-        "mid": 10000,
-        "bids": [{"price": 9999, "size": 10}],
-        "asks": [{"price": 10001, "size": 30}],
-        "mids": [9900, 10000],
-    }
-    imbalance, mid_change, spread, mid_var = features_from_observation(observation)
-    assert imbalance < 0
-    assert mid_change > 0
-    assert spread > 0
-    assert mid_var == 0
+def test_features_use_only_the_bar_window():
+    bar = (9999, 10001, 10, 30, 10000, 1, 5, 1)
+    values = features_from_bars([bar] * (LOOKBACK + 1))
+    assert values is not None
+    assert len(values) == INPUT_DIM
+    assert values[FEATURE_NAMES.index("imbalance")] < 0
+    assert values[FEATURE_NAMES.index("spread_bps")] > 0
+    assert values[FEATURE_NAMES.index("trade_sign")] == 1

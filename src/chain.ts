@@ -173,6 +173,11 @@ export class LocalSolana implements Chain {
       stdio: ['ignore', log, log],
       env: { ...process.env, PATH: `${dirname(bin)}${delimiter}${process.env.PATH ?? ''}` },
     })
+    // #region agent log
+    this.child.on('exit', (code, signal) => {
+      fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'C',location:'chain.ts:child-exit',message:'validator child exited',data:{code,signal,tail:readTail(logPath).slice(-300)},timestamp:Date.now()})}).catch(()=>{});
+    })
+    // #endregion
     for (let attempt = 0; attempt < 60; attempt += 1) {
       if (await this.reachable()) {
         // #region agent log
@@ -194,19 +199,16 @@ export class LocalSolana implements Chain {
 
   private async fund(owner: Keypair): Promise<void> {
     const balance = await this.connection.getBalance(owner.publicKey)
-    if (balance >= LAMPORTS_PER_SOL) return
-    // requestAirdrop fails on Windows: the RPC dials the faucet at 0.0.0.0:9900, and
-    // Windows refuses to connect to 0.0.0.0 (os error 10049). Pay from the faucet key
-    // the validator wrote into its ledger instead. A validator we did not start has no
-    // such file here, so it still gets the airdrop.
-    const faucet = readFaucet(join(this.directory, 'ledger', 'faucet-keypair.json'))
-    if (faucet) {
-      const tx = new Transaction().add(
-        SystemProgram.transfer({ fromPubkey: faucet.publicKey, toPubkey: owner.publicKey, lamports: 2 * LAMPORTS_PER_SOL }),
-      )
-      await sendAndConfirmTransaction(this.connection, tx, [faucet], { commitment: 'confirmed' })
-      return
+    let slot: number | null = null
+    try {
+      slot = await this.connection.getSlot()
+    } catch {
+      slot = null
     }
+    // #region agent log
+    fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'A',location:'chain.ts:fund',message:'before airdrop',data:{balance,slot,childExit:this.child?.exitCode ?? null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    if (balance >= LAMPORTS_PER_SOL) return
     const signature = await this.connection.requestAirdrop(owner.publicKey, 2 * LAMPORTS_PER_SOL)
     await this.connection.confirmTransaction(signature, 'confirmed')
   }

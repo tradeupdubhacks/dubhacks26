@@ -5,37 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from pathlib import Path
 
-import torch
 import websockets
 
 from model.client import ModelClient
-from model.features import features_from_observation
-from model.net import SignalNet
 from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
-
-ARTIFACTS = Path(__file__).resolve().parent / "artifacts" / "signal.pt"
-
-
-def load_scorer(path: Path = ARTIFACTS):
-    if not path.exists():
-        raise SystemExit(f"Missing {path}. Run python -m model.train first.")
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    network = SignalNet()
-    network.load_state_dict(blob["state_dict"])
-    network.eval()
-    mean = blob["mean"]
-    std = blob["std"]
-    threshold = float(blob["threshold"])
-
-    def score(features: list[float]) -> float:
-        scaled = [(value - center) / scale for value, center, scale in zip(features, mean, std)]
-        tensor = torch.tensor(scaled, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            return float(torch.sigmoid(network(tensor)).item())
-
-    return score, threshold
+from model.score import Scorer
 
 
 # Documented in docs/model-api.md. The client instrument payload does not repeat them.
@@ -144,7 +119,7 @@ async def session(base_url: str) -> None:
         item["symbol"]: item
         for item in client.instruments()["instruments"]
     }
-    score_of, threshold = load_scorer()
+    scorer = Scorer()
     # The server remembers every id, including ones from an earlier connection.
     ids = IdSource(prefix=f"bot{int(time.time() * 1000):x}")
     inflight = InFlight()
@@ -153,7 +128,14 @@ async def session(base_url: str) -> None:
     last_decision = 0.0
     waiting = False
     halted = False
-    print(f"connected to {client.ws_url()}, policy threshold {threshold:.2f}")
+    announced = False
+    ready_announced = False
+    entry_ts: int | None = None
+    last_sign = 0
+    print(
+        f"connected to {client.ws_url()}, enter {scorer.enter_bps:.1f} bps "
+        f"over {scorer.horizon_bars * scorer.bar_ms / 1000:.0f}s"
+    )
     async with websockets.connect(client.ws_url(), max_queue=None) as socket:
         while True:
             try:
@@ -176,13 +158,21 @@ async def session(base_url: str) -> None:
             if observation is None:
                 continue
             if observation.get("stakeCents") is None and not observation.get("halted"):
+                scorer.reset()
+                entry_ts = None
+                last_sign = 0
+                announced = False
+                ready_announced = False
                 if not waiting:
                     print("waiting for a live session. Open one from the page.")
                     waiting = True
                 continue
             if waiting:
-                print("live session found, quoting")
+                print("live session found")
                 waiting = False
+                scorer.reset()
+                announced = False
+                ready_announced = False
             now = loop.time()
             if now - last_decision < DECISION_INTERVAL:
                 continue
@@ -192,9 +182,35 @@ async def session(base_url: str) -> None:
             if limits is None:
                 continue
             view = inflight.view(observation, now)
-            features = features_from_observation(view)
-            score = score_of(features) if features is not None else 0.5
-            decision = decide(view, limits, score, threshold, ids, features)
+            expected = scorer.update(observation)
+            if not scorer.ready and not announced:
+                print("waiting 2 minutes for a price window before sending orders")
+                announced = True
+            elif scorer.ready and not ready_announced:
+                if scorer.enter_bps > 100:
+                    print("price window ready. no forecast cleared the taker fee, so no orders are sent")
+                else:
+                    print(f"price window ready. entry level {scorer.enter_bps:.0f} bps")
+                ready_announced = True
+            position = int(observation.get("positionLots") or 0)
+            sign = (position > 0) - (position < 0)
+            ts = int(observation.get("ts") or 0)
+            if sign == 0:
+                entry_ts = None
+            elif entry_ts is None or sign != last_sign:
+                entry_ts = ts
+            last_sign = sign
+            held = 0 if entry_ts is None else max(0, (ts - entry_ts) // scorer.bar_ms)
+            decision = decide(
+                view,
+                limits,
+                expected,
+                scorer.enter_bps,
+                scorer.exit_bps,
+                scorer.horizon_bars,
+                held,
+                ids,
+            )
             if decision.reason == "halted":
                 if not halted:
                     print("session halted, not sending orders")
@@ -208,7 +224,7 @@ async def session(base_url: str) -> None:
                 # Nothing to flatten. Near a rail on a flat book, or a stale feed with no orders.
                 continue
             if decision.orders or decision.cancels or decision.cancel_all or decision.flatten:
-                print(decision.reason, len(decision.orders), "orders")
+                print(f"{decision.reason} expected {expected:.1f} bps, {len(decision.orders)} orders")
                 await _send(socket, decision, sent_at, inflight, view)
 
 
