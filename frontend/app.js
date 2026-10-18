@@ -67,9 +67,9 @@ const TRADE_SYMBOL = 'BTC-USDT';
 // The models a session can use. The ids are the server's model ids (GET /v1/bot); the page shows
 // one card per model the server offers, in this order, with these names and risk tags.
 const STRATEGY_CARDS = [
-  { id: 'hft', name: 'Faster', tag: 'high risk', tagClass: 'high' },          // model/hft.py, the rule bot
   { id: 'network', name: 'Slower', tag: 'low risk', tagClass: 'low' },        // the team network, hybrid policy
   { id: 'transformer', name: 'Transformer', tag: 'medium risk', tagClass: 'medium' }, // model/live_session.py
+  { id: 'hft', name: 'Faster', tag: 'high risk', tagClass: 'high' },          // model/hft.py, the rule bot
   { id: 'small', name: 'Small network', tag: 'rarely trades', tagClass: 'pending' },  // model/live_session.py
 ];
 const DEFAULT_STRATEGY = 'network';
