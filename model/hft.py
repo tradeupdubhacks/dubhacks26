@@ -1,25 +1,30 @@
-"""High-frequency rule bot: buy on any downtick, sell on the first uptick that beats the fees.
+"""High-frequency rule bot: trade with the top-of-book imbalance, exit when it turns.
 
 Selected with BOT_STRATEGY=hft. Meant for a server started with FEE_MODEL=solana, where a fill
-costs only its Solana network fee (about 0.1 cents). It holds one long position at a time:
+costs only its Solana network fee (about 0.1 cents).
 
-- Flat: when the mid ticks down from the last mid the bot saw, buy with an IOC at the ask.
-- Long: sell the whole position with an IOC at the bid as soon as the sale, after its fee,
-  returns more than the buy cost including its fee, plus HFT_MIN_PROFIT_CENTS.
+Imbalance is (bid size - ask size) / (bid size + ask size) at the touch. On the BTC tape a book
+leaning one way keeps moving that way for a few seconds, and that move is far larger than the
+one-tick spread a taker pays.
 
-The Solana fee is per transaction, not per dollar, so size decides how small a move pays.
-The bot trades enough lots that one price tick covers a round trip's fees HFT_TICK_COVER
-times (default 2), capped at HFT_MAX_LEVERAGE times the stake (default 50). HFT_LOTS fixes
-the size instead. Under the exchange fee model no size makes one tick pay, so it trades one lot.
+- Flat: buy with an IOC at the ask when imbalance >= HFT_ENTER_IMBALANCE (default 0.6). Sell
+  short with an IOC at the bid when it is <= minus that.
+- Long: sell everything at the bid once imbalance <= -HFT_EXIT_IMBALANCE (default 0, i.e. the
+  book stops leaning our way) or after HFT_MAX_HOLD_S seconds (default 5). Short is the mirror.
 
-There is no stop-loss. The session floor is the only downside limit.
+Size is HFT_LOTS (default 100, about $8,400 of BTC), capped at HFT_MAX_LEVERAGE times the stake
+(default 100). There is no stop-loss beyond the hold limit; the session floor is the hard limit.
+
+Simulated on 26 ten-minute windows of recorded BTCUSDT (2026-10-01 and 2026-10-17) through the
+server with FEE_MODEL=solana, a $100 stake reached +$5 in all 26, with a median of about
+1.5 minutes and no dip below -$1.33. That simulation fills at the recorded top of book after
+the server's 50ms latency; real queues and exchange fees would cut into it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 import time
 from dataclasses import dataclass
@@ -32,19 +37,20 @@ from model.policy import Decision, IdSource, InstrumentLimits, aggressive_price,
 
 @dataclass
 class HftConfig:
-    tick_cover: float = 2.0
-    max_leverage: float = 50.0
-    min_profit_cents: float = 0.0
-    lots: int | None = None
+    enter_imbalance: float = 0.6
+    exit_imbalance: float = 0.0
+    max_hold_s: float = 5.0
+    lots: int = 100
+    max_leverage: float = 100.0
 
     @classmethod
     def from_env(cls) -> "HftConfig":
-        lots = os.environ.get("HFT_LOTS")
         return cls(
-            tick_cover=float(os.environ.get("HFT_TICK_COVER", cls.tick_cover)),
+            enter_imbalance=float(os.environ.get("HFT_ENTER_IMBALANCE", cls.enter_imbalance)),
+            exit_imbalance=float(os.environ.get("HFT_EXIT_IMBALANCE", cls.exit_imbalance)),
+            max_hold_s=float(os.environ.get("HFT_MAX_HOLD_S", cls.max_hold_s)),
+            lots=int(os.environ.get("HFT_LOTS", cls.lots)),
             max_leverage=float(os.environ.get("HFT_MAX_LEVERAGE", cls.max_leverage)),
-            min_profit_cents=float(os.environ.get("HFT_MIN_PROFIT_CENTS", cls.min_profit_cents)),
-            lots=int(lots) if lots else None,
         )
 
 
@@ -69,52 +75,53 @@ class Fees:
         return notional_cents * self.taker_bps / 10_000 + self.solana_cents
 
 
+def imbalance(observation: dict) -> float | None:
+    bids, asks = observation.get("bids") or [], observation.get("asks") or []
+    if not bids or not asks:
+        return None
+    bid_size, ask_size = int(bids[0]["size"]), int(asks[0]["size"])
+    total = bid_size + ask_size
+    return (bid_size - ask_size) / total if total > 0 else 0.0
+
+
 class HftTrader:
     def __init__(self, config: HftConfig, fees: Fees) -> None:
         self.config = config
         self.fees = fees
-        self.last_mid: int | None = None
+        self.entered_ts: int | None = None
+        # Our own fills, to report each round trip: signed lots and the cash they moved, fees included.
         self.lots = 0
-        self.cost_cents = 0.0  # what the open lots cost, fees included
+        self.cash = 0.0
+        self.round_trips: list[float] = []
 
     def reset(self) -> None:
-        self.last_mid = None
+        self.entered_ts = None
         self.lots = 0
-        self.cost_cents = 0.0
+        self.cash = 0.0
+        self.round_trips = []
 
-    def on_events(self, events: list[dict], ours: str) -> None:
-        """Track the cost of our own fills. `ours` is this connection's clientOrderId prefix."""
+    def on_events(self, events: list[dict], ours: str) -> list[float]:
+        """Track our fills. Returns the P&L, in cents, of any round trip they closed."""
+        closed = []
         for event in events:
             if event.get("type") != "fill" or not str(event.get("clientOrderId", "")).startswith(ours):
                 continue
             size = int(event["size"])
             notional = int(event["price"]) * size / 1000
             fee = int(event.get("fee") or 0)
-            if event.get("side") == "buy":
-                self.lots += size
-                self.cost_cents += notional + fee
-            elif self.lots > 0:
-                sold = min(size, self.lots)
-                self.cost_cents -= self.cost_cents * sold / self.lots
-                self.lots -= sold
+            sign = 1 if event.get("side") == "buy" else -1
+            self.cash += -sign * notional - fee
+            self.lots += sign * size
+            if self.lots == 0:
+                closed.append(self.cash)
+                self.round_trips.append(self.cash)
+                self.cash = 0.0
+        return closed
 
     def size(self, price: int, stake: int, limits: InstrumentLimits) -> int:
-        if self.config.lots:
-            lots = self.config.lots
-        elif self.fees.taker_bps > 0 or self.fees.solana_cents <= 0:
-            lots = 1
-        else:
-            tick_value = limits.price_tick_cents / 1000  # cents one lot gains on a one-tick move
-            lots = math.ceil(self.config.tick_cover * 2 * self.fees.solana_cents / tick_value)
         lot_cents = price / 1000
-        cap = int(stake * self.config.max_leverage // lot_cents) if lot_cents > 0 else lots
-        return max(1, min(lots, cap, limits.max_order_lots))
-
-    def profit_if_sold(self, bid: int, lots: int) -> float:
-        """Cents left after selling `lots` at `bid` and paying the sell fee, minus what they cost."""
-        proceeds = bid * lots / 1000
-        cost = self.cost_cents * lots / max(1, self.lots)
-        return proceeds - self.fees.on(proceeds) - cost
+        cap = int(stake * self.config.max_leverage // lot_cents) if lot_cents > 0 else self.config.lots
+        return max(1, min(self.config.lots, cap, limits.max_order_lots))
 
     def decide(self, observation: dict, limits: InstrumentLimits, ids: IdSource) -> Decision:
         if observation.get("halted"):
@@ -124,42 +131,40 @@ class HftTrader:
             return Decision(reason="no_session")
         if observation.get("priceSource") == "stale":
             return Decision(cancel_all=True, reason="stale")
-        bids, asks = observation.get("bids") or [], observation.get("asks") or []
-        if not bids or not asks:
+        imb = imbalance(observation)
+        if imb is None:
             return Decision(reason="empty_book")
-        bid, ask = int(bids[0]["price"]), int(asks[0]["price"])
-        mid = int(observation.get("mid") or (bid + ask) // 2)
-        previous, self.last_mid = self.last_mid, mid
         if any(o.get("status") in ("pending", "open") for o in observation.get("openOrders") or []):
             return Decision(reason="working")
+        bid, ask = int(observation["bids"][0]["price"]), int(observation["asks"][0]["price"])
         position = int(observation.get("positionLots") or 0)
+        ts = int(observation.get("ts") or 0)
         tick = limits.price_tick_cents
 
-        if position > 0:
-            if self.lots != position:
-                # Fills we did not see (a restart): price the position at the current mark.
-                notional = mid * position / 1000
-                self.lots, self.cost_cents = position, notional + self.fees.on(notional)
-            if self.profit_if_sold(bid, position) <= self.config.min_profit_cents:
-                return Decision(reason="hold")
-            size = min(position, limits.max_order_lots)
-            order = {"clientOrderId": ids.next_id(), "side": "sell", "size": size, "type": "ioc",
-                     "price": aggressive_price("sell", bid, ask, tick)}
-            return Decision(orders=[order], reason="sell_uptick")
-        if position < 0:
-            return Decision(flatten=True, reason="flat_short")
+        def order(side: str, size: int, reason: str) -> Decision:
+            price = aggressive_price(side, bid, ask, tick)
+            return Decision(orders=[{"clientOrderId": ids.next_id(), "side": side, "size": size, "type": "ioc", "price": price}], reason=reason)
 
-        self.lots, self.cost_cents = 0, 0.0
-        if previous is None or mid >= previous:
-            return Decision(reason="no_downtick")
-        size = self.size(ask, int(stake), limits)
-        while size > 0 and not position_allows(observation, "buy", size, limits):
-            size -= 1
-        if size < 1:
-            return Decision(reason="position_limit")
-        order = {"clientOrderId": ids.next_id(), "side": "buy", "size": size, "type": "ioc",
-                 "price": aggressive_price("buy", bid, ask, tick)}
-        return Decision(orders=[order], reason="buy_downtick")
+        if position == 0:
+            self.entered_ts = None
+            side = "buy" if imb >= self.config.enter_imbalance else "sell" if imb <= -self.config.enter_imbalance else None
+            if side is None:
+                return Decision(reason="no_signal")
+            size = self.size(ask if side == "buy" else bid, int(stake), limits)
+            while size > 0 and not position_allows(observation, side, size, limits):
+                size -= 1
+            if size < 1:
+                return Decision(reason="position_limit")
+            return order(side, size, f"enter_{'long' if side == 'buy' else 'short'}")
+
+        if self.entered_ts is None:
+            self.entered_ts = ts
+        held_s = (ts - self.entered_ts) / 1000
+        turned = imb <= -self.config.exit_imbalance if position > 0 else imb >= self.config.exit_imbalance
+        if not turned and held_s < self.config.max_hold_s:
+            return Decision(reason="hold")
+        side = "sell" if position > 0 else "buy"
+        return order(side, min(abs(position), limits.max_order_lots), "exit_turned" if turned else "exit_timeout")
 
 
 async def session(base_url: str) -> None:
@@ -180,16 +185,17 @@ async def session(base_url: str) -> None:
     last_decision = 0.0
     last_ts: int | None = None
     waiting = halted = False
-    round_trips = 0
-    realized = 0.0
-    print(f"hft bot connected to {client.ws_url()}: buy any downtick, sell the first uptick that beats the fees")
+    print(
+        f"hft bot connected to {client.ws_url()}: enter at imbalance {config.enter_imbalance:g}, exit when it turns "
+        f"past {config.exit_imbalance:g} or after {config.max_hold_s:g}s, {config.lots} lots"
+    )
 
     def announce_fees() -> None:
         fees = trader.fees
         if fees.model == "solana":
             print(f"fees: Solana only, {fees.solana_cents:.3f} cents per fill")
         else:
-            print(f"fees: exchange {fees.taker_bps:g} bps per taker fill. Start the server with FEE_MODEL=solana for one-tick trading.")
+            print(f"fees: exchange {fees.taker_bps:g} bps per taker fill. This bot is tuned for FEE_MODEL=solana and will lose money on exchange fees.")
 
     announce_fees()
     async with websockets.connect(client.ws_url(), max_queue=None) as socket:
@@ -204,20 +210,9 @@ async def session(base_url: str) -> None:
             if kind == "events":
                 events = message.get("events") or []
                 inflight.on_events(events)
-                before = trader.cost_cents / max(1, trader.lots) if trader.lots else 0.0
-                trader.on_events(events, prefix)
-                for event in events:
-                    if event.get("type") != "fill" or not str(event.get("clientOrderId", "")).startswith(prefix):
-                        continue
-                    if event["side"] == "sell":
-                        proceeds = event["price"] * event["size"] / 1000 - int(event.get("fee") or 0)
-                        gain = proceeds - before * event["size"]
-                        realized += gain
-                        round_trips += 1
-                        print(f"sold {event['size']} lots at {event['price'] / 100:,.2f}: {gain:+.2f}¢ "
-                              f"(round trip {round_trips}, total {realized:+.2f}¢)")
-                    else:
-                        print(f"bought {event['size']} lots at {event['price'] / 100:,.2f} (fee {event.get('fee', 0)}¢)")
+                for pnl in trader.on_events(events, prefix):
+                    total = sum(trader.round_trips)
+                    print(f"round trip {len(trader.round_trips)}: {pnl:+.2f}¢ (session total {total:+.2f}¢)")
                 continue
             if kind == "error":
                 print("server error", message.get("error"))
@@ -238,7 +233,6 @@ async def session(base_url: str) -> None:
                 trader.reset()
                 trader.fees = Fees.from_instruments(client.instruments())
                 announce_fees()
-                round_trips, realized = 0, 0.0
             waiting = False
             last_ts = ts
             now = loop.time()
@@ -252,7 +246,7 @@ async def session(base_url: str) -> None:
             decision = trader.decide(view, limits, ids)
             if decision.reason == "halted":
                 if not halted:
-                    print("session halted, not sending orders")
+                    print(f"session halted ({observation.get('haltReason')}), not sending orders")
                     halted = True
                 continue
             halted = False

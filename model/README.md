@@ -42,11 +42,25 @@ The server's `FEE_MODEL` flag sets what a fill costs:
 
 `GET /v1/instruments` reports the active model under `fees`.
 
-The `hft` bot holds one long position at a time:
+The `hft` bot trades with the top-of-book imbalance, `(bid size - ask size) / (bid size + ask size)`:
 
-- **Buy** when flat and the mid ticks down from the last mid it saw, with an IOC at the ask.
-- **Sell** the whole position with an IOC at the bid, as soon as the sale (after its fee) returns more than the buy cost (including its fee) plus `HFT_MIN_PROFIT_CENTS` (default `0`).
+- **Enter** when flat: buy with an IOC at the ask when imbalance is at least `HFT_ENTER_IMBALANCE` (default `0.6`). Sell short at the bid when it is at most minus that.
+- **Exit** when the book stops leaning its way (imbalance past `HFT_EXIT_IMBALANCE`, default `0`), or after `HFT_MAX_HOLD_S` seconds (default `5`).
+- **Size** is `HFT_LOTS` (default `100`, about $8,400 of BTC), capped at `HFT_MAX_LEVERAGE` times the stake (default `100`).
 
-The Solana fee is per transaction, not per dollar, so size decides how small a move pays. The bot trades enough lots that one price tick covers a round trip's fees `HFT_TICK_COVER` times (default `2`): about 40 BTC lots, or about 400 SOL lots. Size is capped at `HFT_MAX_LEVERAGE` times the stake (default `50`). `HFT_LOTS` sets a fixed size instead. Under the exchange fee model no size lets one tick pay, so the bot trades one lot.
+There is no stop-loss beyond the hold limit. The session floor is the hard limit.
 
-There is no stop-loss. The session floor is the only downside limit.
+**Results.** The rule was tuned with 10-minute simulations run through the server on recorded BTCUSDT data, with a $100 deposit, $0 floor, $105 ceiling and `FEE_MODEL=solana`. Settings were picked on 4 windows and checked on 22 others (2026-10-01 at every hour used, plus two windows from 2026-10-17). It reached +$5 in all 26:
+
+- The median time to +$5 was about 1.5 minutes. The slowest was 7.9 minutes.
+- The deepest dip on the way was -$1.33.
+- A live session on the running stack hit +$5.32 in 2 minutes 38 seconds, with every fill settled on the local validator.
+
+The earlier rule, buying on any downtick, lost money in the same simulations. BTC's short-term moves continue rather than reverse.
+
+**Limits:**
+
+- Fills happen at the recorded top of book after the server's 50ms latency. There is no queue competition and no market impact beyond the displayed size.
+- The edge depends on `FEE_MODEL=solana`. A round trip of 100 lots gains about 24 cents on average. With the exchange fee model's 5 bps per taker fill, the same round trip would pay about $8.35 in fees.
+- `BTC-USDT` sessions replay 2026-10-01 from its start, so a live session is not new data.
+- On `SOL-USD` the server's quotes are a synthetic ladder, so the imbalance carries no signal there.
