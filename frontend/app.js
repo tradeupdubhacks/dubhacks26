@@ -1,7 +1,7 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const API_BASE = 'http://localhost:3000'; // trading server (client API)
+const API_BASE = 'http://localhost:3001'; // trading server (client API)
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const STORAGE_KEY = 'shopState.v2';
 const HISTORY_DAYS = 90;
