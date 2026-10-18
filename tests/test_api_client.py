@@ -8,7 +8,7 @@ from model.client import ModelClient
 
 def _up() -> bool:
     try:
-        urllib.request.urlopen("http://localhost:3000/v1/health", timeout=0.5)
+        urllib.request.urlopen("http://127.0.0.1:3000/v1/health", timeout=0.5)
         return True
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
@@ -21,7 +21,7 @@ server = pytest.mark.skipif(not _up(), reason="model API is not running on port 
 def test_health_is_fake_execution():
     body = ModelClient().health()
     assert body["ok"] is True
-    assert body["execution"] == "fake"
+    assert body["execution"] in ("fake", "solana")
 
 
 @server

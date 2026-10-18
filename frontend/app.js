@@ -5,6 +5,8 @@ const API_BASE = 'http://localhost:3000'; // trading server (client API)
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const STORAGE_KEY = 'shopState.v2';
 const HISTORY_DAYS = 90;
+const HISTORY_PATH = '/v1/history'; // coin price candles (confirmed: GET /v1/history, branch "balls", src/app.ts)
+const HISTORY_INTERVAL = '1d';
 
 /* ============================================================
    DATA
@@ -15,8 +17,8 @@ const PRODUCTS = [
   { id: 'p3', name: 'Travel Backpack',     price: 54.50,  emoji: '🎒', desc: '25L, water resistant.' },
 ];
 
-// Display info per coin. The server only supplies symbol, base and data type,
-// and has no history endpoint, so the chart and stats below are simulated placeholders.
+// Display info per coin. The server supplies symbol, base and data type; price history comes
+// from GET /v1/history (see loadHistory). The seeded series below is only a fallback.
 const COIN_META = {
   BTC: { name: 'Bitcoin', seed: 22, drift: 0.0008, vol: 0.025,
     notes: ['Steadier of the two: smaller swings', 'Tends to lead the rest of the crypto market'] },
@@ -42,7 +44,7 @@ const REASON_NOTES = {
 // Defaults used until (or unless) GET /v1/instruments answers.
 let market = {
   loaded: false,
-  houseFundCents: 100000,
+  houseFundCents: 10000000,
   depositMin: 100,
   depositMax: 10000,
   fees: { makerBps: 2, takerBps: 5 },
@@ -71,27 +73,36 @@ function gauss(rand) {
 }
 const hashSeed = s => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
 
-function buildHistory(c) {
-  const rand = mulberry32(c.seed);
-  const history = [100];
-  const returns = [];
-  for (let i = 0; i < HISTORY_DAYS; i++) {
-    const r = c.drift + c.vol * gauss(rand);
-    returns.push(r);
-    history.push(history[history.length - 1] * (1 + r));
-  }
+// prices: closes, oldest first. Returns the series rebased to 100 plus the stats the page shows.
+function summarize(prices) {
+  const values = prices.map(p => (p / prices[0]) * 100);
+  const returns = values.slice(1).map((v, i) => v / values[i] - 1);
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const stdev = Math.sqrt(returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length);
-  let peak = history[0], maxDD = 0;
-  history.forEach(v => { peak = Math.max(peak, v); maxDD = Math.max(maxDD, (peak - v) / peak); });
-  c.history = history;
-  c.stats = {
-    vol: stdev,
-    maxDD,
-    ret: history[history.length - 1] / history[0] - 1,
-    bestDay: Math.max(...returns),
-    worstDay: Math.min(...returns),
+  let peak = values[0], maxDD = 0;
+  values.forEach(v => { peak = Math.max(peak, v); maxDD = Math.max(maxDD, (peak - v) / peak); });
+  return {
+    values,
+    stats: {
+      vol: stdev,
+      maxDD,
+      ret: values[values.length - 1] / values[0] - 1,
+      bestDay: Math.max(...returns),
+      worstDay: Math.min(...returns),
+    },
   };
+}
+
+// Fallback only: a seeded random walk used when the history endpoint can't be reached.
+function buildHistory(c) {
+  const rand = mulberry32(c.seed);
+  const prices = [100];
+  for (let i = 1; i < HISTORY_DAYS; i++) {
+    prices.push(prices[i - 1] * (1 + c.drift + c.vol * gauss(rand)));
+  }
+  const { values, stats } = summarize(prices);
+  c.history = values;
+  c.stats = stats;
 }
 
 const coinCache = {};
@@ -108,11 +119,61 @@ function getCoin(inst) {
 const coins = () => market.instruments.map(getCoin);
 const selectedCoin = () =>
   getCoin(market.instruments.find(i => i.symbol === state.trade.symbol) || market.instruments[0]);
-const maxVol = () => Math.max(...coins().map(c => c.stats.vol));
+
+/* ============================================================
+   COIN PRICE HISTORY (GET /v1/history: public daily candles)
+   ============================================================ */
+const histories = {}; // symbol -> { status: 'loading' | 'ok' | 'error', ... }
+
+async function loadHistory(inst) {
+  const h = histories[inst.symbol];
+  if (h && (h.status !== 'error' || Date.now() - h.at < 15000)) return; // loaded, loading, or failed recently
+  histories[inst.symbol] = { status: 'loading' };
+  try {
+    const q = `symbol=${encodeURIComponent(inst.base)}&interval=${HISTORY_INTERVAL}&limit=${HISTORY_DAYS}`;
+    const r = await api(`${HISTORY_PATH}?${q}`);
+    const closes = (r.candles || []).map(k => k.closeCents).filter(n => n > 0);
+    if (closes.length < 2) throw new Error('not enough history');
+    const { values, stats } = summarize(closes);
+    histories[inst.symbol] = { status: 'ok', values, stats, source: r.source, latestCents: closes[closes.length - 1] };
+  } catch {
+    histories[inst.symbol] = { status: 'error', at: Date.now() };
+  }
+  refreshHistoryUI();
+}
+
+// What the page shows for a coin: real history, the simulated fallback, or null while loading.
+function series(c) {
+  const h = histories[c.symbol];
+  if (h && h.status === 'ok') return { ...h, simulated: false };
+  if (h && h.status === 'error') return { values: c.history, stats: c.stats, simulated: true };
+  return null;
+}
+const volOf = c => { const s = series(c); return s ? s.stats.vol : null; };
+const maxVol = () => Math.max(0.0001, ...coins().map(c => volOf(c) || 0));
 function volLevel(c) {
-  const sorted = coins().map(x => x.stats.vol).sort((a, b) => a - b);
-  const frac = sorted.length > 1 ? sorted.indexOf(c.stats.vol) / (sorted.length - 1) : 0;
+  const vols = coins().map(volOf);
+  if (vols.some(v => v === null)) return null; // wait until every coin has loaded so the ranking is fair
+  const sorted = [...vols].sort((a, b) => a - b);
+  const frac = sorted.length > 1 ? sorted.indexOf(volOf(c)) / (sorted.length - 1) : 0;
   return frac < 0.34 ? 'low' : frac < 0.67 ? 'medium' : 'high';
+}
+function volTag(c, word) {
+  const lv = volLevel(c);
+  return lv ? `<span class="tag ${lv}">${lv} ${word}</span>` : '<span class="tag pending">…</span>';
+}
+function chartCaption(s) {
+  if (!s) return `Growth of $100 over the last ${HISTORY_DAYS} days`;
+  if (s.simulated) return `Growth of $100 over the last ${HISTORY_DAYS} days <span class="warn">(simulated placeholder data: live price history is unavailable)</span>`;
+  const src = String(s.source || 'exchange');
+  return `Growth of $100 over the last ${s.values.length} days · prices from ${esc(src[0].toUpperCase() + src.slice(1))}`;
+}
+// Re-render the trading page when history arrives, unless the user is typing in a field.
+function refreshHistoryUI() {
+  if (currentPath() !== '/trading' || modal === 'live') return;
+  const el = document.activeElement;
+  if (el && el.matches && el.matches('input, select')) { setTimeout(refreshHistoryUI, 800); return; }
+  renderTrading();
 }
 
 /* ============================================================
@@ -133,6 +194,7 @@ function loadState() {
   } catch { return d; }
 }
 let state = loadState();
+if (!state.active && !state.runs.length && !state.ended) { state = defaultState(); try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {} }
 const save = () => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {} };
 
 /* ============================================================
@@ -147,6 +209,7 @@ const setText = (id, txt) => { const el = document.getElementById(id); if (el) e
 
 const money = n => '$' + n.toFixed(2);
 const moneyC = c => money(c / 100);
+const usd = c => (c / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 const signedC = c => (c >= 0 ? '+' : '−') + money(Math.abs(c) / 100);
 const pct = (n, d = 1) => (n * 100).toFixed(d) + '%';
 const currentPath = () => location.hash.slice(1) || '/';
@@ -217,6 +280,7 @@ async function loadMarket() {
       state.trade.symbol = market.instruments[0].symbol;
       save();
     }
+    market.instruments.forEach(loadHistory);
     if (currentPath() === '/trading' && modal !== 'live') renderTrading();
   } finally { loadingMarket = false; }
 }
@@ -282,8 +346,10 @@ function renderHome() {
             <h3>${p.name}</h3>
             <div class="muted small">${p.desc}</div>
             <div class="price">${money(p.price)}</div>
-            <button class="btn" data-action="add" data-id="${p.id}">Add to cart</button>
-          </div>`).join('')}
+            ${state.cart[p.id] > 0
+              ? '<button class="btn added" disabled>Added to cart</button>'
+              : `<button class="btn" data-action="add" data-id="${p.id}">Add to cart</button>`}
+            </div>`).join('')}
       </div>
     </div>`;
 }
@@ -369,7 +435,9 @@ function renderTrading() {
   const orderC = cartTotalC();
   if (!orderC) { location.hash = '#/'; return; }
   ensureTradeDefaults();
+  market.instruments.forEach(loadHistory);
   const t = state.trade, c = selectedCoin(), list = coins(), mv = maxVol();
+  const s = series(c), st = s && s.stats;
   const minC = minInvestC(), maxC = maxInvestC(), f = market.fees;
   const capped = orderC > market.depositMax;
   const num = v => (Number.isFinite(v) ? v : '');
@@ -392,7 +460,7 @@ function renderTrading() {
               ${list.map(x => `
                 <button class="crypto-item ${x.symbol === c.symbol ? 'active' : ''}" data-action="select-crypto" data-id="${esc(x.symbol)}">
                   <span><strong>${esc(x.base)}</strong> <span class="muted small">${esc(x.name)}</span></span>
-                  <span class="tag ${volLevel(x)}">${volLevel(x)} vol</span>
+                  ${volTag(x, 'vol')}
                 </button>`).join('')}
             </div>
             <label class="field">Initial investment
@@ -414,26 +482,26 @@ function renderTrading() {
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center">
               <h2 style="margin:0">${esc(c.name)} (${esc(c.base)})</h2>
-              <span class="tag ${volLevel(c)}">${volLevel(c)} volatility</span>
+              ${volTag(c, 'volatility')}
             </div>
-            <div class="muted small" style="margin:4px 0 8px">Model performance on $100 over the last ${HISTORY_DAYS} days (simulated placeholder data)</div>
-            <canvas id="chart"></canvas>
+            <div class="muted small" style="margin:4px 0 8px">${chartCaption(s)}</div>
+            ${s ? '<canvas id="chart"></canvas>' : '<div class="chart-loading">Loading price history…</div>'}
 
             <div class="stats">
-              <div class="stat"><div class="label">Avg daily swing</div><div class="value">${pct(c.stats.vol)}</div></div>
-              <div class="stat"><div class="label">Max drawdown</div><div class="value">−${pct(c.stats.maxDD, 0)}</div></div>
-              <div class="stat"><div class="label">${HISTORY_DAYS}-day model return</div><div class="value">${c.stats.ret >= 0 ? '+' : ''}${pct(c.stats.ret, 0)}</div></div>
-              <div class="stat"><div class="label">Best day</div><div class="value">+${pct(c.stats.bestDay)}</div></div>
-              <div class="stat"><div class="label">Worst day</div><div class="value">${pct(c.stats.worstDay)}</div></div>
-              <div class="stat"><div class="label">Price data</div><div class="value">${c.data === 'replay' ? 'Recorded' : 'Live'}</div></div>
+              <div class="stat"><div class="label">Avg daily swing</div><div class="value">${st ? pct(st.vol) : '—'}</div></div>
+              <div class="stat"><div class="label">Max drawdown</div><div class="value">${st ? '−' + pct(st.maxDD, 0) : '—'}</div></div>
+              <div class="stat"><div class="label">${s ? s.values.length : HISTORY_DAYS}-day return</div><div class="value">${st ? (st.ret >= 0 ? '+' : '') + pct(st.ret, 0) : '—'}</div></div>
+              <div class="stat"><div class="label">Best day</div><div class="value">${st ? '+' + pct(st.bestDay) : '—'}</div></div>
+              <div class="stat"><div class="label">Worst day</div><div class="value">${st ? pct(st.worstDay) : '—'}</div></div>
+              <div class="stat"><div class="label">Latest price</div><div class="value">${s && s.latestCents ? usd(s.latestCents) : '—'}</div></div>
             </div>
 
             <strong class="small">Volatility vs. other cryptos</strong>
             ${list.map(x => `
               <div class="vol-row ${x.symbol === c.symbol ? 'active' : ''}">
                 <span>${esc(x.base)}</span>
-                <div class="vol-bar"><div style="width:${(x.stats.vol / mv) * 100}%"></div></div>
-                <span>${pct(x.stats.vol)}</span>
+                <div class="vol-bar"><div style="width:${volOf(x) === null ? 0 : (volOf(x) / mv) * 100}%"></div></div>
+                <span>${volOf(x) === null ? '—' : pct(volOf(x))}</span>
               </div>`).join('')}
 
             <strong class="small" style="display:block;margin-top:14px">Things to know</strong>
@@ -471,7 +539,7 @@ function renderTrading() {
       </div>
     </div>`;
 
-  drawChart($('#chart'), c.history);
+  if (s) drawChart($('#chart'), s.values);
   updateSummary();
 }
 
@@ -566,7 +634,7 @@ function drawChart(canvas, data) {
     ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
     ctx.fillText('$' + v.toFixed(0), 6, yy + 4);
   }
-  ctx.fillText('90d ago', pad.l, h - 6);
+  ctx.fillText(data.length + 'd ago', pad.l, h - 6);
   ctx.fillText('today', w - pad.r - 30, h - 6);
 
   if (min < 100 && max > 100) {
@@ -626,7 +694,14 @@ const live = {
   ws: null, session: null, finished: null, connected: false,
   stopping: false, stopWhy: null,
   timer: null, pingTimer: null, reconnectTimer: null, lastMsg: 0, actionsKey: null,
+  series: [], fillKeys: new Set(), markers: [], fillsKey: null,
 };
+const LIVE_SAMPLE_MS = 500; // one chart point per half second; the watch socket sends ~5 a second
+const LIVE_POINTS = 2400;   // past this, every other point is dropped so the whole session stays on the chart
+
+function resetLiveData() {
+  live.series = []; live.fillKeys = new Set(); live.markers = []; live.fillsKey = null;
+}
 
 async function startTrading() {
   if (state.active || startBusy) return;
@@ -645,6 +720,7 @@ async function startTrading() {
     };
     save();
     live.session = s; live.finished = null; live.stopping = false; live.stopWhy = null;
+    resetLiveData(); recordSample(s);
     openLiveModal(); connectWatch(); scheduleDuration();
   } catch (e) {
     if (e.code === 'offline') setStartError(`Can't reach the trading server at ${esc(API_BASE)}. Make sure it's running, then try again.`);
@@ -658,6 +734,7 @@ async function startTrading() {
 function resumeLive() {
   if (!state.active) return;
   live.session = null; live.finished = null; live.stopping = false; live.stopWhy = null;
+  resetLiveData();
   openLiveModal(); connectWatch(); scheduleDuration();
 }
 
@@ -675,13 +752,26 @@ function openLiveModal() {
       <div class="stat"><div class="label">Your investment now</div><div class="value" id="lv-stake"></div></div>
       <div class="stat"><div class="label">Result so far</div><div class="value" id="lv-pnl"></div></div>
     </div>
+    <div class="stats live-market">
+      <div class="stat"><div class="label">${esc(base)} price</div><div class="value" id="lv-mid">–</div></div>
+      <div class="stat"><div class="label">Fund is holding</div><div class="value" id="lv-pos">–</div></div>
+      <div class="stat"><div class="label">Trades</div><div class="value" id="lv-trades">0</div></div>
+    </div>
+    <div class="live-chart-head"><strong>Your investment</strong><span class="muted small" id="lv-span"></span></div>
+    <canvas class="live-chart" id="lv-chart-stake"></canvas>
+    <div class="live-chart-head">
+      <strong>${esc(base)} price</strong>
+      <span class="legend small muted"><i class="dot buy"></i>Fund bought <i class="dot sell"></i>Fund sold</span>
+    </div>
+    <canvas class="live-chart" id="lv-chart-price"></canvas>
+    <div class="live-chart-head"><strong>Recent trades</strong></div>
+    <div class="live-fills" id="lv-fills"><div class="muted small">No trades yet. The model trades small amounts, so this can take a moment.</div></div>
     <div class="summary">
       <div class="line"><span>Started with</span><strong>${moneyC(a.depositCents)}</strong></div>
       <div class="line"><span>Stops if it falls to</span><strong>${moneyC(a.floorCents)}</strong></div>
       <div class="line"><span>Stops if it grows to</span><strong>${moneyC(a.ceilingCents)}</strong></div>
       <div class="line"><span>Time</span><strong id="lv-time"></strong></div>
     </div>
-    <div class="live-graph-placeholder">Live graph goes here (next step)</div>
     <div class="small muted" id="lv-note"></div>
     <div class="field-error" id="lv-error"></div>
     <div class="modal-actions" id="lv-actions"></div>`);
@@ -715,6 +805,7 @@ function updateLive() {
   else timeTxt = fmtClock(Date.now() - a.startedAt) + ' · no time limit';
   setText('lv-time', timeTxt);
   setText('lv-note', fin ? (REASON_NOTES[fin.reason] || '') : '');
+  updateLiveMarket();
 
   // Only rebuild the buttons when their state changes, so clicks are never lost to a refresh.
   const key = fin ? 'fin' : live.stopping ? 'stopping' : 'run';
@@ -729,6 +820,150 @@ function updateLive() {
   }
 }
 function setLiveError(msg) { setText('lv-error', msg || ''); }
+
+const fillKey = f => [f.orderId, f.ts, f.side, f.price, f.size].join('|');
+
+// One chart point per LIVE_SAMPLE_MS from watch snapshots, plus every new fill as a price marker.
+function recordSample(s) {
+  const now = Date.now();
+  if (!live.series.length && Array.isArray(s.stakeHistory)) {
+    // A reopened popup starts from the server's short stake history instead of an empty chart.
+    for (const p of s.stakeHistory) {
+      const t = Date.parse(p.ts);
+      if (Number.isFinite(t) && t < now) live.series.push({ t, stake: p.stakeCents, mid: null });
+    }
+  }
+  const last = live.series[live.series.length - 1];
+  if (last && now - last.t < LIVE_SAMPLE_MS) {
+    last.stake = s.stakeCents; last.mid = s.midCents ?? last.mid;
+  } else {
+    live.series.push({ t: now, stake: s.stakeCents, mid: s.midCents ?? null });
+    if (live.series.length > LIVE_POINTS) {
+      const n = live.series.length;
+      live.series = live.series.filter((_, i) => i % 2 === 0 || i === n - 1);
+    }
+  }
+  for (const f of s.fills || []) {
+    const key = fillKey(f);
+    if (live.fillKeys.has(key)) continue;
+    live.fillKeys.add(key);
+    const t = Date.parse(f.ts);
+    live.markers.push({ t: Number.isFinite(t) ? t : now, v: f.price, side: f.side });
+  }
+}
+
+function lotsText(lots, base) {
+  if (!lots) return 'Nothing';
+  const coins = (Math.abs(lots) / 1000).toFixed(3) + ' ' + base;
+  return lots > 0 ? coins : coins + ' (short)';
+}
+
+function updateLiveMarket() {
+  const v = live.session;
+  if (!v) return;
+  const base = String(v.instrument || '').split('-')[0];
+  setText('lv-mid', v.midCents ? usd(v.midCents) : '–');
+  setText('lv-pos', lotsText(v.positionLots, base));
+  setText('lv-trades', String(live.fillKeys.size));
+
+  const pts = live.series;
+  setText('lv-span', pts.length > 1 ? 'last ' + fmtClock(pts[pts.length - 1].t - pts[0].t) : '');
+  drawLive(document.getElementById('lv-chart-stake'), pts.map(p => ({ t: p.t, v: p.stake })), {
+    fmt: c => moneyC(c), minSpan: 10, color: '#6c4cf1', area: true,
+    refs: [
+      { v: v.depositCents, label: 'start', color: '#9ca3af' },
+      { v: v.floorCents, label: 'floor', color: '#dc2626' },
+      { v: v.ceilingCents, label: 'target', color: '#16a34a' },
+    ],
+  });
+  const mids = pts.filter(p => p.mid != null).map(p => ({ t: p.t, v: p.mid }));
+  drawLive(document.getElementById('lv-chart-price'), mids, {
+    fmt: c => usd(c), minSpan: mids.length ? Math.max(2, mids[mids.length - 1].v * 0.0005) : 2,
+    color: '#0f766e', markers: live.markers,
+  });
+
+  const fills = v.fills || [];
+  const key = fills.length ? fillKey(fills[0]) + '#' + fills.length : '';
+  const box = document.getElementById('lv-fills');
+  if (box && fills.length && live.fillsKey !== key) {
+    live.fillsKey = key;
+    box.innerHTML = fills.slice(0, 6).map(f => {
+      const t = new Date(f.ts);
+      const when = Number.isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
+      const sig = f.signature ? `<span class="muted small" title="Solana transaction ${esc(f.signature)}">tx ${esc(f.signature.slice(0, 6))}…</span>` : '';
+      return `<div class="fill-row">
+        <span class="side ${f.side === 'buy' ? 'good' : 'bad'}">${f.side === 'buy' ? 'Bought' : 'Sold'}</span>
+        <span>${esc((f.size / 1000).toFixed(3))} ${esc(base)} at ${usd(f.price)}</span>
+        <span class="muted small">${esc(when)}</span>${sig}
+      </div>`;
+    }).join('');
+  }
+}
+
+/* Time-series line for the live popup. Points are { t: ms, v: number }.
+   refs are horizontal lines drawn only when they fall near the visible range. */
+function drawLive(canvas, pts, o) {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.font = '11px system-ui';
+  if (pts.length < 2) {
+    ctx.fillStyle = '#6b7280'; ctx.fillText('Waiting for live data…', 12, h / 2 + 4);
+    return;
+  }
+
+  const pad = { l: 78, r: 12, t: 10, b: 20 };
+  const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 1000);
+  const marks = (o.markers || []).filter(m => m.t >= t0 && m.t <= t1);
+  const vals = pts.map(p => p.v).concat(marks.map(m => m.v));
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < o.minSpan) { const mid = (hi + lo) / 2; lo = mid - o.minSpan / 2; hi = mid + o.minSpan / 2; }
+  const span = hi - lo;
+  const refs = (o.refs || []).filter(r => r.v != null && r.v >= lo - span && r.v <= hi + span);
+  for (const r of refs) { lo = Math.min(lo, r.v); hi = Math.max(hi, r.v); }
+  const pady = (hi - lo) * 0.08; lo -= pady; hi += pady;
+
+  const x = t => pad.l + ((t - t0) / (t1 - t0)) * (w - pad.l - pad.r);
+  const y = v => pad.t + (1 - (v - lo) / (hi - lo)) * (h - pad.t - pad.b);
+
+  ctx.strokeStyle = '#eceef3'; ctx.fillStyle = '#6b7280';
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + ((hi - lo) * i) / 3, yy = y(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
+    ctx.fillText(o.fmt(v), 6, yy + 4);
+  }
+  ctx.fillText('−' + fmtClock(t1 - t0), pad.l, h - 5);
+  ctx.fillText('now', w - pad.r - 22, h - 5);
+
+  for (const r of refs) {
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = r.color;
+    ctx.beginPath(); ctx.moveTo(pad.l, y(r.v)); ctx.lineTo(w - pad.r, y(r.v)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle = r.color;
+    ctx.fillText(r.label, w - pad.r - ctx.measureText(r.label).width, y(r.v) - 3);
+  }
+
+  if (o.area) {
+    ctx.beginPath(); ctx.moveTo(x(pts[0].t), y(pts[0].v));
+    pts.forEach(p => ctx.lineTo(x(p.t), y(p.v)));
+    ctx.lineTo(x(pts[pts.length - 1].t), h - pad.b); ctx.lineTo(x(pts[0].t), h - pad.b); ctx.closePath();
+    ctx.fillStyle = 'rgba(108,76,241,0.10)'; ctx.fill();
+  }
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v))));
+  ctx.strokeStyle = o.color; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+
+  for (const m of marks) {
+    ctx.beginPath(); ctx.arc(x(m.t), y(m.v), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = m.side === 'buy' ? '#16a34a' : '#dc2626'; ctx.fill();
+  }
+  const lastP = pts[pts.length - 1];
+  ctx.beginPath(); ctx.arc(x(lastP.t), y(lastP.v), 3, 0, Math.PI * 2);
+  ctx.fillStyle = o.color; ctx.fill();
+}
 
 function connectWatch() {
   closeWatch();
@@ -766,6 +1001,7 @@ function onSession(s) {
   if (!a) return;
   if (s.status === 'idle' || s.sessionId !== a.sessionId) { lostSession(); return; }
   live.session = s;
+  recordSample(s);
   if (s.status === 'halted') finalizeRun(s); else updateLive();
 }
 
@@ -831,6 +1067,7 @@ function scheduleDuration() {
 function closeLive() {
   closeWatch(); clearTimeout(live.timer);
   live.finished = null; live.session = null; live.stopping = false; live.stopWhy = null; live.actionsKey = null;
+  resetLiveData();
   closeModal();
   if (currentPath() === '/trading') renderTrading();
 }
@@ -839,8 +1076,7 @@ function closeLive() {
    EVENTS
    ============================================================ */
 const actions = {
-  add: id => { state.cart[id] = (state.cart[id] || 0) + 1; save(); updateCartCount(); },
-  inc: id => { state.cart[id]++; save(); route(); },
+  add: id => { state.cart[id] = (state.cart[id] || 0) + 1; save(); updateCartCount(); if (currentPath() === '/') renderHome(); },  inc: id => { state.cart[id]++; save(); route(); },
   dec: id => { state.cart[id] = Math.max(0, state.cart[id] - 1); save(); route(); },
   remove: id => { delete state.cart[id]; save(); route(); },
   'pay-full': () => completeOrder(cartTotalC()),
@@ -911,8 +1147,9 @@ function route() {
 }
 window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); });
 window.addEventListener('resize', () => {
-  const canvas = $('#chart');
-  if (canvas) drawChart(canvas, selectedCoin().history);
+  const canvas = $('#chart'), s = series(selectedCoin());
+  if (canvas && s) drawChart(canvas, s.values);
+  if (modal === 'live') updateLive();
 });
 
 route();

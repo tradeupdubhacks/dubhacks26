@@ -17,9 +17,14 @@ class ApiError(Exception):
 
 
 class ModelClient:
-    """Calls only the routes in docs/model-api.md."""
+    """Calls only the routes in docs/model-api.md.
 
-    def __init__(self, base_url: str = "http://localhost:3000", timeout: float = 10.0):
+    The default is 127.0.0.1, not localhost. The server listens on IPv4 only, and
+    Windows resolves localhost to ::1 first, then waits about 2s on the refused
+    connection before trying 127.0.0.1. That 2s lands on every request.
+    """
+
+    def __init__(self, base_url: str = "http://127.0.0.1:3000", timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
@@ -54,9 +59,9 @@ class ModelClient:
 
     def health(self) -> dict:
         body = self.request("GET", "/v1/health")
-        if body.get("execution") != "fake":
+        if body.get("execution") not in ("fake", "solana"):
             raise RuntimeError(
-                "Refusing to trade because GET /v1/health execution is not 'fake'."
+                "Refusing to trade because GET /v1/health execution is not 'fake' or 'solana'."
             )
         return body
 
@@ -65,6 +70,10 @@ class ModelClient:
 
     def account(self) -> dict:
         return self.request("GET", "/v1/account")
+
+    def bars(self, limit: int = 601) -> dict:
+        """Recent 200ms bars, including the two minutes the server plays before a session."""
+        return self.request("GET", f"/v1/bars?limit={limit}")
 
     def reset(self, body: dict | None = None) -> dict:
         return self.request("POST", "/v1/reset", body or {})

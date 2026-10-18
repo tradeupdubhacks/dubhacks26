@@ -6,7 +6,7 @@ Base URL: `http://localhost:3000`
 
 WebSocket: `ws://localhost:3000`
 
-All JSON bodies use `Content-Type: application/json`. There is no authentication. Accounts, cash, and fills are dummy ledger entries on localhost. Market data may be read from a local tape or from a public mid. The order itself is never forwarded to Binance, Jupiter, Coinbase, or Solana.
+All JSON bodies use `Content-Type: application/json`. There is no authentication. Accounts, cash, and fills are dummy ledger entries on localhost. Market data may be read from a local tape or from a public mid. The order itself is never forwarded to Binance, Jupiter, or Coinbase. Training fills stay in memory. A live session fill is an SPL transfer on the local validator.
 
 Two ways to run, and they do not overlap:
 
@@ -24,7 +24,7 @@ Two ways to run, and they do not overlap:
 
 | Field | Meaning |
 | --- | --- |
-| `*Cents` | Dummy USD cents. `100000` is the `$1000` house fund. |
+| `*Cents` | Dummy USD cents. `10000000` is the `$100,000` house fund. |
 | `price` | Integer USD cents for **one** whole base coin. Must be a multiple of the instrument's `priceTickCents`. |
 | `size` | Integer lots. One lot is `0.001` base coin. |
 | `ts` on events | Market time in milliseconds. In training this is the episode clock, starting at `0` on reset. In a live session this is the session clock, starting at `0` when the session is created. It is not a wall-clock timestamp. |
@@ -46,8 +46,8 @@ Latency: an accepted order waits `50ms` of **market** time before it can match. 
 | Data in training | The same tape, advanced only by `step` | Synthetic mid and counterparty quotes. No public HTTP calls |
 | `priceTickCents` | `10` | `1` |
 | Lot | `0.001` BTC | `0.001` SOL |
-| `maxOrderLots` | `10` | `2000` |
-| `maxPositionLots` | `10` | `10000` |
+| `maxOrderLots` | `100000` | `2000` |
+| `maxPositionLots` | `100000` | `10000` |
 | Orders per `1000ms` of market time | `20` | `20` |
 
 The rate limit counts accepted `place` requests, not cancels and not duplicate ids. The 21st new id inside the window is rejected with `rate_limit`. Training that sends one order per `100ms` step stays under the limit. A burst of 21 different ids in one step does not.
@@ -235,13 +235,15 @@ Shape failures on a single REST place return `400` with `error.reason` set to th
 Same body as the client API.
 
 ```json
-{ "ok": true, "mode": "localhost", "execution": "fake" }
+{ "ok": true, "mode": "localhost", "execution": "solana" }
 ```
+
+`npm start` reports `"solana"`. A process built without a chain, including `npm test`, reports `"fake"`. Training orders stay in memory either way. Live session fills are SPL transfers only when `execution` is `"solana"`.
 
 **Use cases**
 
 - Fail a trainer fast when the server is down.
-- Confirm `execution` is `fake` before sending orders, so a caller does not assume the fills are on an exchange.
+- Confirm `execution` is `fake` or `solana` before sending orders. Any other value means the fills are not this gateway.
 
 ### `GET /v1/instruments`
 
@@ -305,6 +307,39 @@ A snapshot of the book only.
 - Poll once before subscribing, to seed a strategy that does not want the account block.
 - Reconcile a stream gap. The book route is the current book, not a delta.
 
+### `GET /v1/bars`
+
+Recent 200ms bars of the current market, oldest first, so a model can fill its lookback window without waiting.
+
+When a live session opens, the server first plays two minutes of history into this buffer, so `limit=601` is full at `ts` 0:
+
+- `BTC-USDT` plays the first two minutes of the tape. The session clock then starts at the tape position after them.
+- `SOL-USD` rebuilds the mid from recent Coinbase `SOL-USD` trades. The series is shifted to meet the current live mid and quoted the same way as the live feed. If Coinbase cannot be reached, there is no history and the buffer fills live.
+
+History bars have negative `ts`. After the open, the server adds one bar per 200ms of market time.
+
+**Query.** `limit`: integer from `1` to `601`. Default `601`.
+
+**Response 200**
+
+```json
+{
+  "market": "BTC-USDT",
+  "barMs": 200,
+  "bars": [
+    { "ts": -120000, "bid": 8357560, "ask": 8357570, "bidSize": 2969, "askSize": 2709, "mid": 8357565, "tradeSide": "buy", "tradeSize": 3 }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `ts` | integer | Market time in ms at the end of the bar. Negative before the session opened. |
+| `bid`, `ask`, `mid` | integer | Top of book and mid, in cents. |
+| `bidSize`, `askSize` | integer | Lots at the top of book. |
+| `tradeSide` | `"buy"` \| `"sell"` \| `null` | Aggressor of a trade printed in this bar, or `null`. |
+| `tradeSize` | integer | Lots of that trade. `0` with no trade. |
+
 ### `GET /v1/account`
 
 The full [Observation](#observation).
@@ -338,7 +373,7 @@ Start a training episode. Refused while a live session exists.
 }
 ```
 
-`observation.step` is `0`, `observation.ts` is `0`, `observation.clock` is `"step"`, position is `0`, and equity is the `$1000` house fund (`100000` cents) with no user deposit. The idempotency cache and open orders are cleared.
+`observation.step` is `0`, `observation.ts` is `0`, `observation.clock` is `"step"`, position is `0`, and equity is the `$100,000` house fund (`10000000` cents) with no user deposit. The idempotency cache and open orders are cleared.
 
 **Response 409.** `session_open`.
 
@@ -423,7 +458,7 @@ A live `BTC-USDT` session accepts `step`. That is how a demo can move the tape f
 - Reuse an id after cancel. Still a duplicate of the canceled ack. Choose a new id.
 - Self-trade. Rest a sell, then send a market buy that would hit it. The sell is canceled. The buy fills against the next seller if there is one. There is no fill whose two sides are both the pool.
 - Rate limit. Twenty-one new limit ids in one step, each size `1`, priced so they would rest. The first twenty ack. The twenty-first is `rate_limit`.
-- Position limit. On `BTC-USDT`, `maxPositionLots` is `10`. An order that would make `11` is `position_limit` and is not queued.
+- Position limit. On `BTC-USDT`, `maxPositionLots` is `100000`. An order that would push the signed position past that, counting resting and pending lots, is `position_limit` and is not queued.
 - Bad tick. BTC price `6000001` is `bad_tick` because the tick is `10` cents.
 - Market order with a price. `price_forbidden`, and the clock does not move because shape checks run first.
 - Read `reward` while flat and before any fill. On a step that only replays tape, a flat position has `reward` of `0` even if `mid` changes.

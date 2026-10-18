@@ -23,6 +23,8 @@ Commands below are run from `dubhacks26/`.
 
    The installer also adds that `PATH` line to `~/.profile` and `~/.bash_profile`. Open a new shell, or run the `export` line, before the first start.
 
+   On Windows, that script refuses to run. Download `https://release.anza.xyz/stable/agave-install-init-x86_64-pc-windows-msvc.exe`, run `agave-install-init.exe stable`, and open a new terminal so `solana-test-validator.exe` is on `PATH`. The server looks for the `.exe` under `%USERPROFILE%\.local\share\solana\install\active_release\bin`. Agave 4.3.1 cannot create a new ledger on Windows (`os error 5` while checking `genesis.tar.bz2`), so a Windows start copies `chain/fresh-ledger` and does not pass `--reset`. Linux and macOS still pass `--reset` and create a ledger themselves.
+
 The BTC replay files are already in `hft/data/raw/` (`BTCUSDT_20261001_book_ticker.csv.gz` and `BTCUSDT_20261001_trades.csv.gz`). A live `SOL-USD` session reads a public mid from Binance, then Jupiter, then Coinbase, so that machine needs outbound HTTPS.
 
 ## Start
@@ -56,11 +58,13 @@ Optional environment variables:
 
 Open `http://127.0.0.1:3000/`. The page is served by this process. It can open a session, watch the stake, and stop. It cannot place orders.
 
-A session is a deposit of `$1` to `$100` pooled with a `$1000` house fund, plus a floor and a ceiling. While it is running, `ws://127.0.0.1:3000/v1/watch` pushes the stake, book, and fills. The full request shapes are in [docs/client-api.md](docs/client-api.md).
+A session is a deposit of `$1` to `$100` pooled with a `$100,000` house fund, plus a floor and a ceiling. While it is running, `ws://127.0.0.1:3000/v1/watch` pushes the stake, book, and fills. The full request shapes are in [docs/client-api.md](docs/client-api.md).
 
 ## Model
 
 Point the model at `http://127.0.0.1:3000`. There is no API key.
+
+On Windows, PyTorch also needs the Microsoft Visual C++ Redistributable (`https://aka.ms/vs/17/release/vc_redist.x64.exe`). Without it `import torch` fails with `WinError 126` and the model exits before it connects. Use `127.0.0.1`, not `localhost`: Windows tries `::1` first and adds about 2 seconds to every request.
 
 - **Training**, with no page session open: `POST /v1/reset`, then `POST /v1/step`. These do not send Solana transactions.
 - **Live trading**, after the page has created a session: `POST /v1/orders` and `ws://127.0.0.1:3000/v1/stream`. Each fill is an SPL token transfer on the local validator. The fill's `signature` is that transaction.

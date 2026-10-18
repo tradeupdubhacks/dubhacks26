@@ -72,11 +72,13 @@ export class BtcTape {
   async advance(marketMs: number): Promise<TopOfBook> {
     if (!this.book || !this.trades || !this.top) throw new Error('BTC tape is not open')
     const target = this.originUs + marketMs * 1_000
-    if (target < this.cursorUs) return this.top
+    if (target < this.cursorUs) return { ...this.top, trade: null }
     let trade = this.lastTrade
+    let printed = false
     while (this.trades.next && this.trades.next.tsUs <= target) {
       const row = this.trades.next
       trade = { price: row.price, size: row.size, side: row.side }
+      printed = true
       this.trades.next = await this.trades.pull()
     }
     let book = this.top
@@ -87,7 +89,13 @@ export class BtcTape {
     this.cursorUs = target
     this.lastTrade = trade
     this.top = { ...book, trade }
-    return this.top
+    // Only a trade that printed during this advance, so a caller does not count one trade twice.
+    return { ...this.top, trade: printed ? trade : null }
+  }
+
+  /** Move market time 0 to `marketMs` into the tape, so history before it can be played first. */
+  rebase(marketMs: number): void {
+    this.originUs += marketMs * 1_000
   }
 
   async close(): Promise<void> {
@@ -153,7 +161,7 @@ function parseTrade(line: string): TradeRow | null {
   const parts = line.split(',')
   if (parts.length < 8) return null
   const tsUs = Number(parts[2])
-  const side = parts[4] === 'buy' || parts[4] === 'sell' ? parts[4] : null
+  const side = parts[5] === 'buy' || parts[5] === 'sell' ? parts[5] : null
   const price = cents(parts[6] ?? '')
   const size = lots(parts[7] ?? '')
   if (!side || !Number.isFinite(tsUs) || price <= 0 || size <= 0) return null

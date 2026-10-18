@@ -26,7 +26,7 @@ describe('gateway', () => {
     assert.equal(health.statusCode, 200)
     assert.equal(health.json().execution, 'fake')
     const instruments = await app.inject({ method: 'GET', url: '/v1/instruments' })
-    assert.equal(instruments.json().houseFundCents, 100_000)
+    assert.equal(instruments.json().houseFundCents, 10_000_000)
     assert.ok(instruments.json().instruments.some((item: { symbol: string }) => item.symbol === 'SOL-USD'))
     const session = await app.inject({ method: 'GET', url: '/v1/session' })
     assert.deepEqual(session.json(), { status: 'idle' })
@@ -361,7 +361,7 @@ describe('order lifecycle', () => {
       payload: {
         dtMs: 100,
         orders: [
-          { clientOrderId: 'big', side: 'buy', size: 10, type: 'limit', price: 10 },
+          { clientOrderId: 'big', side: 'buy', size: 100_000, type: 'limit', price: 10 },
           { clientOrderId: 'over', side: 'buy', size: 1, type: 'limit', price: 10 },
         ],
       },
@@ -410,6 +410,98 @@ describe('order lifecycle', () => {
     if (!('sessionId' in view)) throw new Error('expected a live session')
     assert.equal(view.status, 'halted')
     assert.equal(view.halt?.reason, 'floor')
+  })
+})
+
+describe('history', () => {
+  function kline(price: string) {
+    return [1_710_000_000_000, price, price, price, price, '12.5']
+  }
+
+  it('returns candles for a coin that is not a session instrument', async () => {
+    const seen: string[] = []
+    const built = await buildApp({
+      clock: false,
+      historyFetch: async (input) => {
+        seen.push(String(input))
+        return new Response(JSON.stringify([kline('3500.125'), kline('0.00001234')]))
+      },
+    })
+    const response = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=ETH&interval=1h&limit=2' })
+    assert.equal(response.statusCode, 200)
+    const body = response.json()
+    assert.equal(body.symbol, 'ETH')
+    assert.equal(body.market, 'ETH-USD')
+    assert.equal(body.source, 'binance')
+    assert.equal(body.candles.length, 2)
+    assert.equal(body.candles[0].openCents, 350013)
+    assert.equal(body.candles[0].open, '3500.125')
+    assert.equal(body.candles[1].closeCents, 0)
+    assert.equal(body.candles[1].close, '0.00001234')
+    assert.match(seen[0]!, /symbol=ETHUSDT/)
+    assert.match(seen[0]!, /interval=1h/)
+    assert.match(seen[0]!, /limit=2/)
+    await built.close()
+  })
+
+  it('accepts an instrument symbol and rejects a bad ticker', async () => {
+    const built = await buildApp({
+      clock: false,
+      historyFetch: async () => new Response(JSON.stringify([kline('100')])),
+    })
+    const sol = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=SOL-USD' })
+    assert.equal(sol.statusCode, 200)
+    assert.equal(sol.json().symbol, 'SOL')
+    const btc = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=BTC-USDT' })
+    assert.equal(btc.json().symbol, 'BTC')
+    const bad = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=../SOL' })
+    assert.equal(bad.statusCode, 400)
+    assert.equal(bad.json().error.code, 'bad_symbol')
+    const interval = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=ETH&interval=2h' })
+    assert.equal(interval.json().error.code, 'bad_interval')
+    const limit = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=ETH&limit=0' })
+    assert.equal(limit.json().error.code, 'bad_limit')
+    await built.close()
+  })
+
+  it('maps a missing market to unknown_symbol', async () => {
+    const built = await buildApp({
+      clock: false,
+      historyFetch: async (input) => {
+        const url = String(input)
+        if (url.includes('binance.com')) {
+          return new Response(JSON.stringify({ code: -1121, msg: 'Invalid symbol.' }), { status: 400 })
+        }
+        if (url.includes('coinbase.com')) return new Response(JSON.stringify({ message: 'NotFound' }), { status: 404 })
+        return new Response(JSON.stringify({ error: ['EQuery:Unknown asset pair'], result: {} }))
+      },
+    })
+    const response = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=NOTACOIN' })
+    assert.equal(response.statusCode, 404)
+    assert.equal(response.json().error.code, 'unknown_symbol')
+    await built.close()
+  })
+
+  it('uses Coinbase when Binance refuses the region', async () => {
+    const built = await buildApp({
+      clock: false,
+      historyFetch: async (input) => {
+        const url = String(input)
+        if (url.includes('binance.com')) {
+          return new Response(JSON.stringify({ code: 0, msg: 'restricted' }), { status: 451 })
+        }
+        assert.match(url, /products\/DOGE-USD/)
+        return new Response(JSON.stringify([[1_710_000_000, 0.1, 0.2, 0.12, 0.15, 1000]]))
+      },
+    })
+    const response = await built.app.inject({ method: 'GET', url: '/v1/history?symbol=DOGE&interval=1h&limit=1' })
+    assert.equal(response.statusCode, 200)
+    assert.equal(response.json().source, 'coinbase')
+    assert.equal(response.json().candles[0].open, '0.12')
+    assert.equal(response.json().candles[0].high, '0.2')
+    assert.equal(response.json().candles[0].low, '0.1')
+    assert.equal(response.json().candles[0].closeCents, 15)
+    await built.close()
   })
 })
 
