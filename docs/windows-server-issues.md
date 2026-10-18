@@ -1,33 +1,24 @@
 # Windows server issues
 
-Followed [SETUP.md](SETUP.md) on Windows 10 (build 10.0.26300), Node v24.5.0. Agave 4.3.1 is installed at `%USERPROFILE%\.local\share\solana\install\active_release\bin`. `npm start` listens on `http://127.0.0.1:3000` and `GET /` returns the page. `chain.ready` never becomes `true`.
+Followed [SETUP.md](SETUP.md) on Windows 10 (build 10.0.26300), Node v24.5.0. Agave 4.3.1 is installed at `%USERPROFILE%\.local\share\solana\install\active_release\bin`. `npm start` listens on `http://127.0.0.1:3000` and `GET /` returns the page.
+
+Agave 4.3.1 cannot unpack a genesis ledger on this machine (`Error checking to unpack genesis archive: IO error: Access is denied. (os error 5)`). The copied ledger that skips `--reset` opens, but slot 0 has `total_account_count: 0`, so `requestAirdrop` returns JSON-RPC `-32603 Internal error` even after slots exist. A 1 SOL request fails the same way, so this is not the 2 SOL faucet cap.
+
+When that airdrop fails, the server drops the chain and serves `execution: "fake"`. Sessions, fills, and Stop then work in memory. Fill `signature` is `null`. `chain.ready` is not true on this host.
 
 ## What succeeds
 
 `POST /v1/reset` and `POST /v1/step` for `BTC-USDT` return 200 while no session is open. One step came back with `reward: 0` and a one-level book. That path does not use the validator.
 
-## Health
+## Health after the fallback
+
+Startup still prints the airdrop error, then continues. Health is:
 
 ```json
-{
-  "ok": true,
-  "mode": "localhost",
-  "execution": "solana",
-  "chain": {
-    "rpc": "http://127.0.0.1:8899",
-    "ready": false,
-    "pool": "56hqnJSs7CQ2a4nYRaazJcYgaLuF7qNPkrNd598CmWMX"
-  }
-}
+{ "ok": true, "mode": "localhost", "execution": "fake" }
 ```
 
-`POST /v1/session` then returns `503`:
-
-```text
-airdrop to 56hqnJSs7CQ2a4nYRaazJcYgaLuF7qNPkrNd598CmWMX failed: Internal error
-```
-
-Startup prints that airdrop error and still binds the HTTP port. The validator is not left running.
+`POST /v1/session` returns `201`. A market order fills after the latency delay, and `POST /v1/stop` flattens the position. Both fills had `signature: null`.
 
 ## 1. Git rewrites the Windows ledger template
 

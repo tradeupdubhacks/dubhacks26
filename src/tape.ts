@@ -153,7 +153,7 @@ function parseTrade(line: string): TradeRow | null {
   const parts = line.split(',')
   if (parts.length < 8) return null
   const tsUs = Number(parts[2])
-  const side = parts[4] === 'buy' || parts[4] === 'sell' ? parts[4] : null
+  const side = parts[5] === 'buy' || parts[5] === 'sell' ? parts[5] : null
   const price = cents(parts[6] ?? '')
   const size = lots(parts[7] ?? '')
   if (!side || !Number.isFinite(tsUs) || price <= 0 || size <= 0) return null

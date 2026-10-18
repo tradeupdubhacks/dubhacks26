@@ -35,60 +35,65 @@ def test_tick_rounding_matches_btc_increment():
     assert round_tick(10400, 1, "buy") == 10400
 
 
+def call(obs, expected, held=0, horizon=300, ids=None):
+    return decide(obs, BTC, expected, 10.0, 0.0, horizon, held, ids or IdSource())
+
+
 def test_position_headroom_blocks_the_extra_lot():
-    decision = decide(
-        observation(positionLots=10),
-        BTC,
-        score=0.5,
-        threshold=0.99,
-        ids=IdSource(),
-        features=[0.0, 0.0, 0.0001, 0.0],
-    )
-    assert all(order["side"] != "buy" for order in decision.orders)
+    decision = call(observation(positionLots=10), expected=40.0, held=300)
+    assert decision.orders == []
+
+
+def test_sell_signal_reduces_a_max_long():
+    decision = call(observation(positionLots=10), expected=-40.0, held=300)
     assert decision.orders
     assert decision.orders[0]["side"] == "sell"
-    assert decision.orders[0]["size"] == 1
+    assert decision.orders[0]["type"] == "ioc"
 
 
 def test_halt_sends_nothing():
-    decision = decide(observation(halted=True), BTC, 0.9, 0.2, IdSource(), [0.2, 0.0, 0.01, 0.0])
+    decision = call(observation(halted=True), expected=40.0)
     assert decision == Decision(reason="halted")
 
 
 def test_stale_feed_cancels_and_does_not_place():
-    decision = decide(
-        observation(priceSource="stale"),
-        BTC,
-        0.9,
-        0.2,
-        ids=IdSource(),
-        features=[0.4, 0.0, 0.0001, 0.0],
-    )
+    decision = call(observation(priceSource="stale"), expected=40.0)
     assert decision.cancel_all is True
     assert decision.orders == []
 
 
 def test_order_ids_are_not_reused():
     ids = IdSource()
-    features = [0.0, 0.0, 0.0001, 0.0]
-    first = decide(observation(), BTC, 0.5, 0.99, ids, features)
-    second = decide(observation(), BTC, 0.5, 0.99, ids, features)
+    first = call(observation(), expected=30.0, ids=ids)
+    second = call(observation(), expected=30.0, ids=ids)
     seen = [order["clientOrderId"] for order in first.orders + second.orders]
     assert seen
     assert len(seen) == len(set(seen))
 
 
+def test_flat_signal_does_not_quote_the_touch():
+    decision = call(observation(), expected=0.0)
+    assert decision.orders == []
+    assert decision.reason == "hold"
+
+
+def test_open_position_is_held_for_the_forecast():
+    decision = call(observation(positionLots=1), expected=-40.0, held=10)
+    assert decision.orders == []
+    assert decision.reason == "hold"
+
+
+def test_five_dollar_stake_can_enter():
+    decision = call(observation(stakeCents=500, floorCents=0, ceilingCents=1000), expected=30.0)
+    assert decision.orders
+    assert decision.orders[0]["side"] == "buy"
+    assert decision.orders[0]["type"] == "ioc"
+
+
 def test_near_rail_flattens_instead_of_quoting():
     price = 6000000
     assert notional_cents(price, 1) == 6000
-    decision = decide(
-        observation(stakeCents=6000, floorCents=0),
-        BTC,
-        0.5,
-        0.99,
-        IdSource(),
-        [0.0, 0.0, 0.0001, 0.0],
-    )
+    decision = call(observation(stakeCents=20, floorCents=0, positionLots=1), expected=0.0)
     assert decision.flatten is True
     assert decision.orders == []
 

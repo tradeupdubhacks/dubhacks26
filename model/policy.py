@@ -1,4 +1,9 @@
-"""Turn one observation into model-API order commands."""
+"""Turn one observation into model-API order commands.
+
+Orders follow the predicted return. There is no standing quote on both
+sides of the touch: that rule filled just before the price moved against
+it, and the maker fee made the loss larger.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,9 @@ from dataclasses import dataclass, field
 
 TAKER_BPS = 5
 MAKER_BPS = 2
+SHOCK_BPS = 50
+TARGET_CAP = 10
+WIDE_SPREAD_BPS = 5.0
 
 
 @dataclass
@@ -38,6 +46,42 @@ def round_tick(price: int, tick: int, side: str) -> int:
 
 def notional_cents(price: int, size: int) -> int:
     return int(round(price * size / 1000))
+
+
+def shock_budget_cents(price: int, size: int) -> int:
+    """Room a new position needs: a 50 bps adverse move plus the taker fee to flatten.
+
+    One BTC lot is about $84 of notional. Requiring that whole notional as
+    cushion made a $5 stake unable to send any order.
+    """
+    notion = notional_cents(price, max(1, size))
+    return notion * SHOCK_BPS // 10_000 + notion * TAKER_BPS // 10_000 + 1
+
+
+def lots_that_fit(price: int, room_cents: int, limit: int) -> int:
+    cap = max(0, min(limit, TARGET_CAP))
+    best = 0
+    for size in range(1, cap + 1):
+        if shock_budget_cents(price, size) < room_cents:
+            best = size
+        else:
+            break
+    return best
+
+
+def rail_capacity(observation: dict, price: int, limits: InstrumentLimits) -> int:
+    hard = min(limits.max_position_lots, TARGET_CAP)
+    stake = observation.get("stakeCents")
+    if stake is None or price <= 0:
+        return hard
+    room = 10**12
+    floor = observation.get("floorCents")
+    ceiling = observation.get("ceilingCents")
+    if floor is not None:
+        room = min(room, int(stake) - int(floor))
+    if ceiling is not None:
+        room = min(room, int(ceiling) - int(stake))
+    return lots_that_fit(price, room, hard)
 
 
 def working_lots(observation: dict, side: str) -> int:
@@ -78,49 +122,92 @@ class IdSource:
                 return client_order_id
 
 
+def aggressive_price(side: str, bid: int, ask: int, tick: int) -> int:
+    if side == "buy":
+        price = round_tick(ask, tick, "sell")
+        if price < ask:
+            price += tick
+        return price
+    price = round_tick(bid, tick, "buy")
+    if price > bid:
+        price -= tick
+    return max(price, tick)
+
+
+def entry_lots(expected_bps: float, enter_bps: float, capacity: int) -> int:
+    if capacity < 1 or enter_bps <= 0:
+        return 0
+    multiple = abs(expected_bps) / enter_bps
+    if multiple < 1.5:
+        size = 1
+    elif multiple < 2.5:
+        size = min(4, capacity)
+    else:
+        size = capacity
+    return max(1, min(size, capacity))
+
+
+def desired_lots(
+    expected_bps: float,
+    position: int,
+    held_bars: int,
+    enter_bps: float,
+    exit_bps: float,
+    horizon_bars: int,
+    capacity: int,
+) -> int:
+    """Target inventory. An open trade is held for the forecast horizon so fees are not paid twice."""
+    cap = max(0, min(capacity, TARGET_CAP))
+    if cap < 1:
+        return 0
+    if position != 0 and 0 <= held_bars < horizon_bars:
+        return int(max(-cap, min(cap, position)))
+    if expected_bps >= enter_bps:
+        raw = entry_lots(expected_bps, enter_bps, cap)
+    elif expected_bps <= -enter_bps:
+        raw = -entry_lots(expected_bps, enter_bps, cap)
+    elif position > 0 and expected_bps > -exit_bps:
+        raw = min(position, cap)
+    elif position < 0 and expected_bps < exit_bps:
+        raw = max(position, -cap)
+    else:
+        raw = 0
+    if position > 0 and raw > 0:
+        raw = min(position, cap)
+    elif position < 0 and raw < 0:
+        raw = max(position, -cap)
+    return int(max(-cap, min(cap, raw)))
+
+
 def _best(observation: dict) -> tuple[int, int] | None:
     bids = observation.get("bids") or []
     asks = observation.get("asks") or []
     if not bids or not asks:
         return None
-    return int(bids[0]["price"]), int(asks[0]["price"])
+    bid = int(bids[0]["price"])
+    ask = int(asks[0]["price"])
+    if bid <= 0 or ask <= bid:
+        return None
+    return bid, ask
 
 
-def _near_rail(observation: dict, price: int, size: int) -> bool:
-    stake = observation.get("stakeCents")
-    if stake is None:
-        return False
-    cushion = notional_cents(price, size)
-    floor = observation.get("floorCents")
-    ceiling = observation.get("ceilingCents")
-    if floor is not None and int(stake) - int(floor) <= cushion:
-        return True
-    if ceiling is not None and int(ceiling) - int(stake) <= cushion:
-        return True
-    return False
-
-
-def _passive_prices(bid: int, ask: int, tick: int) -> tuple[int | None, int | None]:
-    buy = round_tick(bid, tick, "buy")
-    sell = round_tick(ask, tick, "sell")
-    if buy >= ask:
-        buy = ask - tick
-    if sell <= bid:
-        sell = bid + tick
-    if buy < tick:
-        buy = None
-    if sell <= 0 or (buy is not None and sell <= buy):
-        sell = None
-    return buy, sell
+def _open_orders(observation: dict) -> list[dict]:
+    return [
+        order
+        for order in (observation.get("openOrders") or [])
+        if order.get("status") in ("pending", "open")
+    ]
 
 
 def decide(
     observation: dict,
     limits: InstrumentLimits,
-    score: float,
-    threshold: float,
+    expected_bps: float,
+    enter_bps: float,
+    exit_bps: float,
+    horizon_bars: int,
+    held_bars: int,
     ids: IdSource,
-    features: list[float] | None,
 ) -> Decision:
     if observation.get("halted"):
         return Decision(reason="halted")
@@ -133,77 +220,69 @@ def decide(
         return Decision(reason="empty_book")
     bid, ask = book
     mid = int(observation.get("mid") or (bid + ask) // 2)
-    if _near_rail(observation, mid, 1):
+    position = int(observation.get("positionLots") or 0)
+    capacity = rail_capacity(observation, mid, limits)
+    if capacity < 1 and position == 0 and not _open_orders(observation):
+        return Decision(reason="near_rail")
+    if capacity < 1:
         return Decision(flatten=True, reason="near_rail")
 
-    imbalance = features[0] if features else 0.0
-    spread = features[2] if features else 0.0
-    confidence = abs(score - 0.5) * 2
-    taker_fee = TAKER_BPS / 10_000
-    direction = "buy" if score >= 0.5 else "sell"
-    take = (
-        confidence >= threshold
-        and abs(imbalance) > taker_fee
-        and abs(imbalance) > spread
-        and ((imbalance > 0) == (direction == "buy"))
+    spread_bps = (ask - bid) / mid * 1e4 if mid else 0.0
+    if spread_bps > WIDE_SPREAD_BPS:
+        if position == 0 and not _open_orders(observation):
+            return Decision(reason="wide_spread")
+        desired = position
+    else:
+        desired = desired_lots(
+            expected_bps, position, held_bars, enter_bps, exit_bps, horizon_bars, capacity
+        )
+    orders = _open_orders(observation)
+    delta = desired - position
+    if orders:
+        if delta == 0:
+            return Decision(cancels=[order["clientOrderId"] for order in orders], reason="cancel")
+        side = "buy" if delta > 0 else "sell"
+        same = [order for order in orders if order.get("side") == side]
+        extras = [order for order in orders if order not in same[:1]]
+        if extras or not same:
+            return Decision(cancels=[order["clientOrderId"] for order in (extras or orders)], reason="cancel")
+        return Decision(reason="working")
+    if delta == 0:
+        # #region agent log
+        try:
+            import json, time
+            with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "A", "location": "policy.py:decide", "message": "no order", "data": {"reason": "hold", "expectedBps": expected_bps, "enterBps": enter_bps, "position": position, "capacity": capacity, "orders": 0}, "timestamp": int(time.time() * 1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return Decision(reason="hold")
+
+    side = "buy" if delta > 0 else "sell"
+    size = min(abs(delta), limits.max_order_lots)
+    while size > 0 and not position_allows(observation, side, size, limits):
+        size -= 1
+    if size < 1:
+        return Decision(reason="position_limit")
+    price = aggressive_price(side, bid, ask, limits.price_tick_cents)
+    reason = "enter" if position == 0 else ("reverse" if desired * position < 0 else "exit")
+    # #region agent log
+    try:
+        import json, time
+        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "C", "location": "policy.py:decide", "message": "order", "data": {"reason": reason, "expectedBps": expected_bps, "enterBps": enter_bps, "side": side, "size": size, "orders": 1}, "timestamp": int(time.time() * 1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return Decision(
+        orders=[
+            {
+                "clientOrderId": ids.next_id(),
+                "side": side,
+                "size": size,
+                "type": "ioc",
+                "price": price,
+            }
+        ],
+        reason=reason,
     )
-
-    decision = Decision(reason="take" if take else "quote")
-    open_orders = [
-        order
-        for order in (observation.get("openOrders") or [])
-        if order.get("status") in ("pending", "open")
-    ]
-    buy_price, sell_price = _passive_prices(bid, ask, limits.price_tick_cents)
-
-    if take:
-        touch = ask if direction == "buy" else bid
-        price = round_tick(touch, limits.price_tick_cents, direction)
-        if direction == "buy" and price < ask:
-            price = round_tick(ask, limits.price_tick_cents, "sell")
-        if direction == "sell" and price > bid:
-            price = round_tick(bid, limits.price_tick_cents, "buy")
-        if position_allows(observation, direction, 1, limits) and not _near_rail(observation, price, 1):
-            decision.orders.append(
-                {
-                    "clientOrderId": ids.next_id(),
-                    "side": direction,
-                    "size": 1,
-                    "type": "ioc",
-                    "price": price,
-                }
-            )
-        for order in open_orders:
-            if order.get("side") == direction:
-                decision.cancels.append(order["clientOrderId"])
-        return decision
-
-    desired = {"buy": buy_price, "sell": sell_price}
-    for side, price in desired.items():
-        if price is None or not position_allows(observation, side, 1, limits):
-            for order in open_orders:
-                if order.get("side") == side:
-                    decision.cancels.append(order["clientOrderId"])
-            continue
-        if _near_rail(observation, price, 1):
-            continue
-        resting = [
-            order
-            for order in open_orders
-            if order.get("side") == side and order.get("type") == "post_only" and order.get("price") == price
-        ]
-        # Keep one quote per side. Extras come from orders placed on a stale snapshot.
-        for order in open_orders:
-            if order.get("side") == side and order not in resting[:1]:
-                decision.cancels.append(order["clientOrderId"])
-        if not resting and 1 <= limits.max_order_lots:
-            decision.orders.append(
-                {
-                    "clientOrderId": ids.next_id(),
-                    "side": side,
-                    "size": 1,
-                    "type": "post_only",
-                    "price": price,
-                }
-            )
-    return decision

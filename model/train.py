@@ -1,321 +1,685 @@
-"""Fit the signal net on the RTX 4080, then score a held-out BTC slice.
+"""Fit the return net on the GPU, then choose a taker rule that clears the fee.
 
-Rows come from POST /v1/reset and POST /v1/step when that server is idle.
-If it is not running, the same feature fields are built from the local
-BTCUSDT book ticker. That file is the recording the model API replays.
-The GPU only fits the network. It does not simulate fills.
+The 2026-10-01 book ticker is the day the server replays. docs/model-issues.md
+holds out the slice that starts at 16:22 UTC. Weights are fit on September
+aggTrades plus the morning of that day. The afternoon picks the entry rule.
+The evening is scored once.
 """
 
 from __future__ import annotations
 
-import csv
-import gzip
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 
-from model.client import ApiError, ModelClient
-from model.features import FEATURE_NAMES, features_from_observation
+from model.bars import SEPTEMBER, ensure_agg_days, load_agg_day, load_tardis_day
+from model.features import (
+    BAR_MS,
+    HORIZONS,
+    INPUT_DIM,
+    LOOKBACK,
+    N_FEAT,
+    N_SEQ,
+    SEQ_LEN,
+    FEATURE_NAMES,
+    series_features,
+)
 from model.net import SignalNet
-from model.splits import split_bounds
+from model.policy import desired_lots, notional_cents
 
 ROOT = Path(__file__).resolve().parent
 ARTIFACTS = ROOT / "artifacts"
-TAPE = ROOT.parent / "hft" / "data" / "raw" / "BTCUSDT_20261001_book_ticker.csv.gz"
-RECORD = ROOT.parent / "hft" / "data" / "out" / "BTCUSDT_20261001_record.npz"
-HORIZON = 8
-TAKER_FEE = 0.0005
-STRIDE = 400
-MAX_ROWS = 80_000
+# Book-ticker timestamp where the held-out replay in docs/model-issues.md begins.
+HOLDOUT_US = 1_790_871_729_793_000
+ENTERS = (1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 36.0)
+MIN_ENTRIES = 10
 
 
 def training_device() -> torch.device:
     if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"training on {torch.cuda.get_device_name(0)}")
-        return device
-    print("CUDA is missing, training on CPU")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        name = torch.cuda.get_device_name(0)
+        print(f"CUDA is working. Training on {name}.")
+        return torch.device("cuda")
+    print("CUDA is not available. Training on CPU.")
     return torch.device("cpu")
 
 
-def _row_from_ticker(row: dict, mids: list[int]) -> tuple[list[float], int] | None:
-    bid = int(round(float(row["bid_price"]) * 100))
-    ask = int(round(float(row["ask_price"]) * 100))
-    if ask <= bid or bid <= 0:
-        return None
-    mid = (bid + ask) // 2
-    mids.append(mid)
-    observation = {
-        "mid": mid,
-        "bids": [{"price": bid, "size": max(1, int(float(row["bid_amount"]) * 1000))}],
-        "asks": [{"price": ask, "size": max(1, int(float(row["ask_amount"]) * 1000))}],
-        "mids": mids[-32:],
-        "priceSource": "tape",
+@dataclass
+class Day:
+    date: str
+    has_book: bool
+    ts: np.ndarray
+    bid: np.ndarray
+    ask: np.ndarray
+    mid: np.ndarray
+    feat: np.ndarray
+    channels: np.ndarray
+    labels: np.ndarray
+
+
+def _labels(mid: np.ndarray) -> np.ndarray:
+    base = mid.astype(np.float64)
+    out = np.full((mid.shape[0], len(HORIZONS)), np.nan, dtype=np.float32)
+    for index, horizon in enumerate(HORIZONS):
+        future = np.full(mid.shape[0], np.nan)
+        future[:-horizon] = base[horizon:]
+        valid = (base > 0) & (future > 0)
+        column = np.zeros(mid.shape[0], dtype=np.float32)
+        column[valid] = ((future[valid] - base[valid]) / base[valid] * 1e4).astype(np.float32)
+        out[:, index] = np.where(valid, column, np.nan)
+    return out
+
+
+def _day_from_bars(date: str, bars: dict[str, np.ndarray], has_book: bool) -> Day:
+    start = int(bars["day_start_ms"][0])
+    count = bars["mid"].shape[0]
+    features, channels = series_features(
+        bars["bid"],
+        bars["ask"],
+        bars["bid_sz"],
+        bars["ask_sz"],
+        bars["mid"],
+        bars["trade_sign"],
+        bars["trade_sz"],
+        bars["book"],
+    )
+    return Day(
+        date=date,
+        has_book=has_book,
+        ts=start + np.arange(count, dtype=np.int64) * BAR_MS,
+        bid=bars["bid"],
+        ask=bars["ask"],
+        mid=bars["mid"],
+        feat=features,
+        channels=channels,
+        labels=_labels(bars["mid"]),
+    )
+
+
+def load_days() -> list[Day]:
+    ensure_agg_days()
+    days = [_day_from_bars("2026-10-01", load_tardis_day(), True)]
+    for date in SEPTEMBER:
+        bars = load_agg_day(date)
+        if bars is None:
+            continue
+        days.append(_day_from_bars(date, bars, False))
+    print(f"loaded {len(days)} days")
+    return days
+
+
+def _pairs(day_index: int, mask: np.ndarray) -> np.ndarray:
+    times = np.flatnonzero(mask).astype(np.int32)
+    out = np.empty((times.shape[0], 2), dtype=np.int32)
+    out[:, 0] = day_index
+    out[:, 1] = times
+    return out
+
+
+def split_indices(days: list[Day]) -> dict[str, np.ndarray]:
+    october = next(day for day in days if day.date == "2026-10-01")
+    october_index = days.index(october)
+    holdout_ms = HOLDOUT_US // 1000
+    test_start = holdout_ms - (holdout_ms - int(october.ts[0])) % BAR_MS
+    calib_start = int(october.ts[0]) + 14 * 3600 * 1000
+    horizon_ms = HORIZONS[-1] * BAR_MS
+    feature_ok = (np.arange(october.mid.shape[0]) >= LOOKBACK) & (october.mid > 0)
+    label_ok = np.isfinite(october.labels).all(axis=1)
+    train_book = _pairs(
+        october_index,
+        feature_ok & label_ok & (october.ts + horizon_ms < calib_start),
+    )
+    blocks = [train_book]
+    for index, day in enumerate(days):
+        if day.date == "2026-10-01":
+            continue
+        ok = (np.arange(day.mid.shape[0]) >= LOOKBACK) & (day.mid > 0) & np.isfinite(day.labels).all(axis=1)
+        blocks.append(_pairs(index, ok))
+    flow = np.concatenate([block for block in blocks[1:]], axis=0) if len(blocks) > 1 else np.empty((0, 2), np.int32)
+    return {
+        "train_book": train_book,
+        "train_flow": flow,
+        "calib_start": np.asarray([calib_start]),
+        "test_start": np.asarray([test_start]),
+        "october_index": np.asarray([october_index]),
     }
-    features = features_from_observation(observation)
-    if features is None:
-        return None
-    return features, mid
 
 
-def collect_from_tape(path: Path = TAPE) -> list[tuple[list[float], int]]:
-    rows: list[tuple[list[float], int]] = []
-    mids: list[int] = []
-    seen = 0
-    with gzip.open(path, "rt", newline="") as handle:
-        for row in csv.DictReader(handle):
-            seen += 1
-            if seen % STRIDE != 0:
-                continue
-            parsed = _row_from_ticker(row, mids)
-            if parsed is None:
-                continue
-            rows.append(parsed)
-            if len(rows) >= MAX_ROWS:
-                break
-    print(f"tape rows {len(rows)} from {path.name}, stride {STRIDE}")
-    return rows
+def batch_matrix(days: list[Day], pairs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    count = pairs.shape[0]
+    features = np.empty((count, INPUT_DIM), dtype=np.float32)
+    targets = np.empty((count, len(HORIZONS)), dtype=np.float32)
+    for day_index in np.unique(pairs[:, 0]):
+        selected = pairs[:, 0] == day_index
+        times = pairs[selected, 1]
+        day = days[int(day_index)]
+        offsets = times[:, None] + np.arange(-SEQ_LEN + 1, 1, dtype=np.int32)[None, :]
+        seq = np.transpose(day.channels[:, offsets], (1, 0, 2)).reshape(times.shape[0], -1)
+        features[selected] = np.concatenate([day.feat[times], seq], axis=1)
+        targets[selected] = day.labels[times]
+    return features, targets
 
 
-def collect_from_api(client: ModelClient, steps: int = 2000) -> list[tuple[list[float], int]]:
-    try:
-        opened = client.reset({"instrument": "BTC-USDT", "episodeSteps": steps})
-    except ApiError as error:
-        if error.code == "session_open":
-            raise SystemExit(
-                "Reset was refused because a live session is open. Train when the server is idle."
-            ) from error
-        raise
-    observation = opened["observation"]
-    rows: list[tuple[list[float], int]] = []
-    for _ in range(steps):
-        features = features_from_observation(observation)
-        if features is not None:
-            rows.append((features, int(observation["mid"])))
+def _demean_labels(days: list[Day], book: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    """Remove the training-set drift so a rally does not become a permanent long bias."""
+    total = np.zeros(len(HORIZONS), dtype=np.float64)
+    count = 0
+    for pairs in (book, flow):
+        if pairs.size == 0:
+            continue
+        for start in range(0, pairs.shape[0], 100_000):
+            chunk = pairs[start : start + 100_000]
+            for day_index in np.unique(chunk[:, 0]):
+                times = chunk[chunk[:, 0] == day_index, 1]
+                values = days[int(day_index)].labels[times]
+                valid = np.isfinite(values).all(axis=1)
+                total += np.nansum(values[valid], axis=0)
+                count += int(valid.sum())
+    center = total / max(count, 1)
+    for day in days:
+        day.labels = day.labels - center.astype(np.float32)
+    return center.astype(np.float32)
+
+
+def _mean_std(days: list[Day], book: np.ndarray, flow: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(7)
+    parts = [book]
+    if flow.shape[0] > 0:
+        take = min(flow.shape[0], 300_000)
+        parts.append(flow[rng.choice(flow.shape[0], size=take, replace=False)])
+    sample = np.concatenate(parts, axis=0)
+    if sample.shape[0] > 400_000:
+        sample = sample[rng.choice(sample.shape[0], size=400_000, replace=False)]
+    total = np.zeros(INPUT_DIM, dtype=np.float64)
+    squares = np.zeros(INPUT_DIM, dtype=np.float64)
+    count = 0
+    for start in range(0, sample.shape[0], 32_768):
+        features, _targets = batch_matrix(days, sample[start : start + 32_768])
+        values = features.astype(np.float64)
+        total += values.sum(axis=0)
+        squares += np.square(values).sum(axis=0)
+        count += features.shape[0]
+    mean = total / count
+    variance = np.maximum(squares / count - np.square(mean), 0.0)
+    std = np.sqrt(variance)
+    std[std < 1e-6] = 1.0
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
+def _predict(
+    network: SignalNet,
+    days: list[Day],
+    pairs: np.ndarray,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    device: torch.device,
+) -> np.ndarray:
+    network.eval()
+    out = np.zeros((pairs.shape[0], len(HORIZONS)), dtype=np.float32)
+    amp = device.type == "cuda"
+    with torch.no_grad():
+        for start in range(0, pairs.shape[0], 8192):
+            chunk = pairs[start : start + 8192]
+            features, _targets = batch_matrix(days, chunk)
+            inputs = torch.tensor(features, device=device)
+            inputs = (inputs - mean) / std
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+                pred = network(inputs).float()
+            out[start : start + chunk.shape[0]] = pred.cpu().numpy()
+    return out
+
+
+def _span_predictions(
+    network: SignalNet,
+    days: list[Day],
+    day_index: int,
+    start: int,
+    stop: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    device: torch.device,
+) -> np.ndarray:
+    times = np.arange(start, stop, dtype=np.int32)
+    valid = times >= LOOKBACK
+    pairs = np.empty((int(valid.sum()), 2), dtype=np.int32)
+    pairs[:, 0] = day_index
+    pairs[:, 1] = times[valid]
+    predicted = _predict(network, days, pairs, mean, std, device) if pairs.shape[0] else np.zeros((0, len(HORIZONS)))
+    full = np.zeros((stop - start, len(HORIZONS)), dtype=np.float32)
+    full[valid] = predicted
+    return full
+
+
+def mark(cash: int, position: int, mid: int) -> int:
+    if position >= 0:
+        return cash + notional_cents(mid, position)
+    return cash - notional_cents(mid, -position)
+
+
+def simulate(
+    expected: np.ndarray,
+    bid: np.ndarray,
+    ask: np.ndarray,
+    mid: np.ndarray,
+    enter: float,
+    exit_bps: float,
+    horizon: int,
+    capacity: int = 10,
+) -> dict[str, int]:
+    position = 0
+    cash = 0
+    fees = 0
+    fills = 0
+    entries = 0
+    opened = -10**9
+    peak = 0
+    trough = 0
+    last = mid.shape[0] - 1
+    for index in range(last):
+        held = 0 if position == 0 else index - opened
+        signal = float(expected[index])
+        if int(mid[index]) <= 0 or int(ask[index]) <= int(bid[index]):
+            signal = 0.0
+        desired = desired_lots(signal, position, held, enter, exit_bps, horizon, capacity)
+        if desired != position:
+            price_index = index + 1
+            delta = desired - position
+            if delta > 0:
+                price = int(ask[price_index])
+                notion = notional_cents(price, delta)
+                fee = notion * 5 // 10_000
+                cash -= notion + fee
+            else:
+                price = int(bid[price_index])
+                notion = notional_cents(price, -delta)
+                fee = notion * 5 // 10_000
+                cash += notion - fee
+            fees += fee
+            fills += 1
+            if position == 0 or (position > 0) != (desired > 0):
+                entries += 1
+                opened = index
+            if desired == 0:
+                opened = -10**9
+            position = desired
+        equity = mark(cash, position, int(mid[min(index + 1, last)]))
+        peak = max(peak, equity)
+        trough = min(trough, equity)
+    if position != 0:
+        if position > 0:
+            notion = notional_cents(int(bid[last]), position)
+            fee = notion * 5 // 10_000
+            cash += notion - fee
+        else:
+            notion = notional_cents(int(ask[last]), -position)
+            fee = notion * 5 // 10_000
+            cash -= notion + fee
+        fees += fee
+        fills += 1
+        position = 0
+    equity = cash
+    return {
+        "pnl_cents": equity,
+        "fees_cents": fees,
+        "fills": fills,
+        "entries": entries,
+        "peak_cents": max(peak, equity),
+        "trough_cents": min(trough, equity),
+    }
+
+
+def choose_rule(expected: np.ndarray, bid: np.ndarray, ask: np.ndarray, mid: np.ndarray) -> dict:
+    best: dict | None = None
+    rejected = {"fee_floor": 0, "few_entries": 0, "thin_edge": 0, "kept": 0}
+    for horizon_index, horizon in enumerate(HORIZONS):
+        column = expected[:, horizon_index]
+        for enter in ENTERS:
+            for exit_bps in (0.0, enter / 2):
+                result = simulate(column, bid, ask, mid, enter, exit_bps, horizon)
+                if result["entries"] < MIN_ENTRIES:
+                    rejected["few_entries"] += 1
+                    continue
+                rejected["kept"] += 1
+                candidate = {
+                    "horizon_index": horizon_index,
+                    "horizon_bars": horizon,
+                    "enter_bps": enter,
+                    "exit_bps": exit_bps,
+                    **result,
+                }
+                if best is None or candidate["pnl_cents"] > best["pnl_cents"]:
+                    best = candidate
+    if best is None:
+        # #region agent log
         try:
-            stepped = client.step({"dtMs": 100})
-        except ApiError as error:
-            if error.code == "step_not_for_live_mid":
-                raise SystemExit(
-                    "step is refused during a live SOL session. Train while the server is idle."
-                ) from error
-            raise
-        observation = stepped["observation"]
-        if stepped.get("done"):
+            import json, time
+            with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "B", "location": "train.py:choose_rule", "message": "flat rule", "data": rejected, "timestamp": int(time.time() * 1000), "runId": "post-fix"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return {
+            "horizon_index": 2,
+            "horizon_bars": HORIZONS[2],
+            "enter_bps": 1_000_000.0,
+            "exit_bps": 0.0,
+            "pnl_cents": 0,
+            "fees_cents": 0,
+            "fills": 0,
+            "entries": 0,
+            "peak_cents": 0,
+            "trough_cents": 0,
+            "flat": True,
+        }
+    best["flat"] = False
+    # #region agent log
+    try:
+        import json, time
+        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "B", "location": "train.py:choose_rule", "message": "trading rule", "data": {"enterBps": best["enter_bps"], "exitBps": best["exit_bps"], "horizonBars": best["horizon_bars"], "entries": best["entries"], "pnlCents": best["pnl_cents"], "rejected": rejected}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return best
+
+
+def race(
+    expected: np.ndarray,
+    bid: np.ndarray,
+    ask: np.ndarray,
+    mid: np.ndarray,
+    rule: dict,
+    stop_cents: int = 500,
+) -> dict[str, int | str | None]:
+    """One $5 deposit. Floor is a $5 loss and ceiling is a $5 gain, on  the pool."""
+    position = 0
+    cash = 0
+    opened = -10**9
+    outcome = "unfinished"
+    end = 0
+    last = mid.shape[0] - 1
+    column = expected[:, rule["horizon_index"]]
+    for index in range(last):
+        equity = mark(cash, position, int(mid[index]))
+        if equity <= -stop_cents:
+            outcome = "floor"
+            end = index
             break
-    print(f"api rows {len(rows)}")
-    return rows
-
-
-def _standardize(rows: list[list[float]], train_end: int) -> tuple[list[float], list[float]]:
-    width = len(rows[0])
-    mean = []
-    std = []
-    for index in range(width):
-        column = [row[index] for row in rows[:train_end]]
-        center = sum(column) / len(column)
-        variance = sum((value - center) ** 2 for value in column) / len(column)
-        mean.append(center)
-        std.append(variance ** 0.5 or 1.0)
-    return mean, std
-
-
-def _tensor(rows: list[list[float]], mean: list[float], std: list[float], device: torch.device) -> torch.Tensor:
-    scaled = [
-        [(value - center) / scale for value, center, scale in zip(row, mean, std)]
-        for row in rows
-    ]
-    return torch.tensor(scaled, dtype=torch.float32, device=device)
+        if equity >= stop_cents:
+            outcome = "ceiling"
+            end = index
+            break
+        room = min(stop_cents + equity, stop_cents - equity)
+        capacity = 0
+        for size in range(1, 11):
+            notion = notional_cents(int(mid[index]), size)
+            budget = notion * 50 // 10_000 + notion * 5 // 10_000 + 1
+            if budget < room:
+                capacity = size
+            else:
+                break
+        held = 0 if position == 0 else index - opened
+        signal = float(column[index]) if capacity > 0 or position != 0 else 0.0
+        desired = desired_lots(
+            signal,
+            position,
+            held,
+            rule["enter_bps"],
+            rule["exit_bps"],
+            rule["horizon_bars"],
+            max(capacity, 0),
+        )
+        if capacity < 1:
+            desired = 0
+        if desired == position or int(ask[index + 1]) <= int(bid[index + 1]):
+            end = index
+            continue
+        delta = desired - position
+        if delta > 0:
+            notion = notional_cents(int(ask[index + 1]), delta)
+            fee = notion * 5 // 10_000
+            cash -= notion + fee
+        else:
+            notion = notional_cents(int(bid[index + 1]), -delta)
+            fee = notion * 5 // 10_000
+            cash += notion - fee
+        if position == 0 or (position > 0) != (desired > 0):
+            opened = index
+        if desired == 0:
+            opened = -10**9
+        position = desired
+        end = index
+    else:
+        if position > 0:
+            notion = notional_cents(int(bid[last]), position)
+            cash += notion - notion * 5 // 10_000
+        elif position < 0:
+            notion = notional_cents(int(ask[last]), -position)
+            cash -= notion + notion * 5 // 10_000
+        position = 0
+        equity = cash
+        if equity >= stop_cents:
+            outcome = "ceiling"
+        elif equity <= -stop_cents:
+            outcome = "floor"
+        end = last
+    return {"outcome": outcome, "bars": end, "seconds": int(end * BAR_MS / 1000)}
 
 
 def fit(
-    features: list[list[float]],
-    labels: list[float],
-    mean: list[float],
-    std: list[float],
+    days: list[Day],
+    book: np.ndarray,
+    flow: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    calib_expected_index: tuple[int, int, int],
     device: torch.device,
-    epochs: int = 8,
-) -> SignalNet:
+) -> tuple[SignalNet, dict]:
     network = SignalNet().to(device)
-    inputs = _tensor(features, mean, std, device)
-    targets = torch.tensor(labels, dtype=torch.float32, device=device)
-    optimizer = torch.optim.Adam(network.parameters(), lr=1e-3)
-    loss_fn = nn.BCEWithLogitsLoss()
-    network.train()
-    count = inputs.shape[0]
-    for epoch in range(epochs):
-        order = torch.randperm(count, device=device)
+    optimizer = torch.optim.AdamW(network.parameters(), lr=3e-4, weight_decay=1e-4)
+    steps = 30
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
+    loss_fn = nn.HuberLoss(delta=5.0, reduction="none")
+    mean_t = torch.tensor(mean, device=device)
+    std_t = torch.tensor(std, device=device)
+    amp = device.type == "cuda"
+    rng = np.random.default_rng(7)
+    torch.manual_seed(7)
+    best_state = {key: value.detach().cpu().clone() for key, value in network.state_dict().items()}
+    best_rule: dict = {"pnl_cents": -10**12, "flat": True}
+    best_loss = 1e18
+    stale = 0
+    day_index, calib_lo, calib_hi = calib_expected_index
+    october = days[day_index]
+    for epoch in range(steps):
+        network.train()
+        if flow.shape[0] > 0:
+            take = min(flow.shape[0], max(book.shape[0] * 4, 1))
+            chosen = flow[rng.choice(flow.shape[0], size=take, replace=False)]
+            pairs = np.concatenate([book, chosen], axis=0)
+        else:
+            pairs = book
+        order = rng.permutation(pairs.shape[0])
         total = 0.0
-        for start in range(0, count, 1024):
-            batch = order[start : start + 1024]
+        seen = 0
+        for start in range(0, pairs.shape[0], 16384):
+            batch = pairs[order[start : start + 16384]]
+            features, targets = batch_matrix(days, batch)
+            inputs = torch.tensor(features, device=device)
+            labels = torch.tensor(targets, device=device)
+            inputs = (inputs - mean_t) / std_t
             optimizer.zero_grad(set_to_none=True)
-            loss = loss_fn(network(inputs[batch]), targets[batch])
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+                pred = network(inputs)
+                weight = 1.0 + 3.0 * (labels.abs() > 10).to(pred.dtype)
+                loss = (loss_fn(pred.float(), labels) * weight.float()).mean()
             loss.backward()
+            nn.utils.clip_grad_norm_(network.parameters(), 1.0)
             optimizer.step()
-            total += float(loss.detach()) * len(batch)
-        print(f"epoch {epoch + 1} loss {total / count:.4f}")
+            total += float(loss.detach()) * batch.shape[0]
+            seen += batch.shape[0]
+        scheduler.step()
+        span = _span_predictions(network, days, day_index, calib_lo, calib_hi, mean_t, std_t, device)
+        rule = choose_rule(span, october.bid[calib_lo:calib_hi], october.ask[calib_lo:calib_hi], october.mid[calib_lo:calib_hi])
+        memory = ""
+        if device.type == "cuda":
+            memory = f" gpu {torch.cuda.max_memory_allocated() / (1024 ** 2):.0f} MiB"
+        loss_now = total / max(seen, 1)
+        print(
+            f"epoch {epoch + 1} loss {loss_now:.4f} "
+            f"calib pnl {rule['pnl_cents'] / 100:.2f} usd entries {rule['entries']}{memory}"
+        )
+        tradable = rule["entries"] > 0 and not rule.get("flat")
+        if not tradable:
+            if loss_now < best_loss:
+                best_loss = loss_now
+                best_rule = rule
+                best_state = {key: value.detach().cpu().clone() for key, value in network.state_dict().items()}
+            continue
+        if rule["pnl_cents"] > best_rule.get("pnl_cents", -10**12) or best_rule.get("flat"):
+            best_rule = rule
+            best_state = {key: value.detach().cpu().clone() for key, value in network.state_dict().items()}
+            stale = 0
+        else:
+            stale += 1
+        if epoch + 1 >= 12 and stale >= 6:
+            print(f"stopping at epoch {epoch + 1}; calibration pnl stopped rising")
+            break
+    network.load_state_dict(best_state)
     network.eval()
-    return network
+    return network, best_rule
 
 
-def probabilities(
-    network: SignalNet,
-    features: list[list[float]],
-    mean: list[float],
-    std: list[float],
-    device: torch.device,
-) -> list[float]:
-    if not features:
-        return []
-    with torch.no_grad():
-        logits = network(_tensor(features, mean, std, device))
-        return torch.sigmoid(logits).detach().cpu().tolist()
+def _bar_index(day: Day, ts_ms: int) -> int:
+    return int((ts_ms - int(day.ts[0])) // BAR_MS)
 
 
-def signal_pnl(
-    scores: list[float],
-    mids: list[int],
-    future_mids: list[int],
-    imbalances: list[float],
-    spreads: list[float],
-    threshold: float,
-) -> tuple[float, int]:
-    total = 0.0
-    trades = 0
-    for score, mid, future, imbalance, spread in zip(scores, mids, future_mids, imbalances, spreads):
-        if mid <= 0:
-            continue
-        confidence = abs(score - 0.5) * 2
-        direction = 1.0 if score >= 0.5 else -1.0
-        agrees = (imbalance > 0) == (direction > 0)
-        if confidence < threshold or abs(imbalance) <= TAKER_FEE or abs(imbalance) <= spread or not agrees:
-            continue
-        total += direction * ((future - mid) / mid) - TAKER_FEE
-        trades += 1
-    return total, trades
-
-
-def choose_threshold(
-    scores: list[float],
-    mids: list[int],
-    future_mids: list[int],
-    imbalances: list[float],
-    spreads: list[float],
-) -> float:
-    best_threshold = 0.99
-    best_pnl = 0.0
-    for step in range(1, 20):
-        threshold = step / 20
-        pnl, _trades = signal_pnl(scores, mids, future_mids, imbalances, spreads, threshold)
-        if pnl > best_pnl:
-            best_pnl = pnl
-            best_threshold = threshold
-    return best_threshold
-
-
-def join_touch_note() -> str:
-    if not RECORD.exists():
-        return "Join-the-touch baseline file is absent. Run hft/run_backtest.py to produce it."
-    try:
-        import numpy as np
-
-        records = np.load(RECORD)
-        last = records[records.files[0]][-1]
-        equity = float(last["balance"] + last["position"] * last["price"] - last["fee"])
-    except Exception as error:
-        return f"Could not read the join-the-touch record: {error}"
-    return (
-        f"Separate HftBacktest join-the-touch equity after fees on the same day: {equity:.6f}. "
-        "That number is not a fill from this bot or from the model API."
-    )
-
-
-def evaluate(rows: list[tuple[list[float], int]], source: str) -> dict:
+def evaluate() -> dict:
     device = training_device()
-    bounds = split_bounds(len(rows), HORIZON)
-    features = [row[0] for row in rows]
-    mids = [row[1] for row in rows]
-    train_end = bounds["train_end"]
-    horizon = bounds["horizon"]
-    train_x = features[:train_end]
-    train_y = [1.0 if mids[index + horizon] > mids[index] else 0.0 for index in range(train_end)]
-    mean, std = _standardize(train_x, train_end)
-    network = fit(train_x, train_y, mean, std, device)
-
-    def slice_scores(start: int, end: int) -> tuple[list[float], list[int], list[int], list[float], list[float]]:
-        window = features[start:end]
-        scores = probabilities(network, window, mean, std, device)
-        now = mids[start:end]
-        future = mids[start + horizon : end + horizon]
-        imbalances = [row[0] for row in window]
-        spreads = [row[2] for row in window]
-        return scores, now, future, imbalances, spreads
-
-    calibration = slice_scores(bounds["calibration_start"], bounds["calibration_end"])
-    threshold = choose_threshold(*calibration)
-    held = slice_scores(bounds["test_start"], bounds["test_end"])
-    held_pnl, trades = signal_pnl(*held, threshold)
-    threshold_note = (
-        "A calibration threshold beat doing nothing after the 5 bps taker fee."
-        if threshold < 0.99
-        else "No taker threshold beat a flat book after the 5 bps fee, so the saved threshold refuses IOC crosses. Passive post-only quotes still run."
+    # A real kernel, so "CUDA is working" is not only a name lookup.
+    if device.type == "cuda":
+        probe = torch.randn(1024, 1024, device=device)
+        probe = probe @ probe
+        torch.cuda.synchronize()
+        print(f"CUDA matmul ok, result mean {float(probe.mean()):.4f}")
+    days = load_days()
+    splits = split_indices(days)
+    book = splits["train_book"]
+    flow = splits["train_flow"]
+    print(f"train book rows {book.shape[0]} flow rows {flow.shape[0]}")
+    if book.shape[0] < 1000:
+        raise SystemExit("Not enough October morning rows to train.")
+    drift = _demean_labels(days, book, flow)
+    print("removed training drift bps", np.round(drift, 3).tolist())
+    mean, std = _mean_std(days, book, flow)
+    october_index = int(splits["october_index"][0])
+    october = days[october_index]
+    calib_lo = _bar_index(october, int(splits["calib_start"][0]))
+    test_lo = _bar_index(october, int(splits["test_start"][0]))
+    network, rule = fit(days, book, flow, mean, std, (october_index, calib_lo, test_lo), device)
+    mean_t = torch.tensor(mean, device=device)
+    std_t = torch.tensor(std, device=device)
+    network = network.to(device)
+    test_hi = october.mid.shape[0] - 1
+    test_span = _span_predictions(network, days, october_index, test_lo, test_hi, mean_t, std_t, device)
+    scored = simulate(
+        test_span[:, rule["horizon_index"]],
+        october.bid[test_lo:test_hi],
+        october.ask[test_lo:test_hi],
+        october.mid[test_lo:test_hi],
+        rule["enter_bps"],
+        rule["exit_bps"],
+        rule["horizon_bars"],
     )
+    stake_race = race(
+        test_span,
+        october.bid[test_lo:test_hi],
+        october.ask[test_lo:test_hi],
+        october.mid[test_lo:test_hi],
+        rule,
+    )
+    hours = (test_hi - test_lo) * BAR_MS / 3_600_000
+    flat_note = (
+        "No calibration rule placed enough orders, so the saved entry level stays flat."
+        if rule.get("flat")
+        else "The entry level is the calibration rule with the highest pnl after taker fees, among rules that placed orders."
+    )
+    # #region agent log
+    try:
+        import json, time
+        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "D", "location": "train.py:evaluate", "message": "unseen", "data": {"enterBps": rule["enter_bps"], "entries": scored["entries"], "fills": scored["fills"], "pnlCents": scored["pnl_cents"], "feesCents": scored["fees_cents"], "hours": round(hours, 2), "flat": bool(rule.get("flat"))}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
     network = network.to("cpu")
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "state_dict": network.state_dict(),
-            "mean": mean,
-            "std": std,
-            "threshold": threshold,
+            "mean": mean.tolist(),
+            "std": std.tolist(),
             "feature_names": FEATURE_NAMES,
+            "n_feat": N_FEAT,
+            "n_seq": N_SEQ,
+            "seq_len": SEQ_LEN,
+            "n_horizons": len(HORIZONS),
+            "horizons": list(HORIZONS),
+            "horizon_index": int(rule["horizon_index"]),
+            "horizon_bars": int(rule["horizon_bars"]),
+            "enter_bps": float(rule["enter_bps"]),
+            "exit_bps": float(rule["exit_bps"]),
+            "bar_ms": BAR_MS,
+            "warmup": LOOKBACK + 1,
         },
         ARTIFACTS / "signal.pt",
     )
     report = {
-        "source": source,
-        "rows": len(rows),
+        "cuda": device.type == "cuda",
         "device": torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu",
-        "splits": bounds,
-        "threshold": threshold,
-        "threshold_note": threshold_note,
-        "held_out_return_after_taker_fee": held_pnl,
-        "held_out_trades": trades,
-        "flat_return": 0.0,
-        "window": "BTCUSDT book ticker 2026-10-01, strided. One recorded day, not a live trading result.",
-        "baseline": join_touch_note(),
+        "days": [day.date for day in days],
+        "train_book_rows": int(book.shape[0]),
+        "train_flow_rows": int(flow.shape[0]),
+        "horizon_bars": int(rule["horizon_bars"]),
+        "horizon_seconds": int(rule["horizon_bars"] * BAR_MS / 1000),
+        "enter_bps": float(rule["enter_bps"]),
+        "exit_bps": float(rule["exit_bps"]),
+        "calibration_pnl_usd": rule["pnl_cents"] / 100,
+        "calibration_entries": int(rule["entries"]),
+        "held_out_pnl_usd": scored["pnl_cents"] / 100,
+        "held_out_fees_usd": scored["fees_cents"] / 100,
+        "held_out_fills": int(scored["fills"]),
+        "held_out_entries": int(scored["entries"]),
+        "held_out_hours": round(hours, 2),
+        "five_dollar_race": stake_race,
+        "flat_return_usd": 0.0,
+        "threshold_note": flat_note,
+        "window": (
+            "Held-out slice of BTCUSDT 2026-10-01 starting at the timestamp in docs/model-issues.md. "
+            "September aggTrades and the morning of 2026-10-01 fit the weights. "
+            "The 14:00-16:22 UTC stretch picked the entry rule."
+        ),
         "note": (
-            "Held-out return sums signed mid moves after a 5 bps taker fee when the signal trades. "
-            "Flat does nothing and returns 0. Fees inside a model-API reward must not be subtracted again. "
-            "This is not evidence of a profitable strategy."
+            "PnL is taker fills at the next 200ms touch, with the server's 5 bps fee. "
+            "The bot no longer joins both sides of the touch. "
+            "A flat book returns 0. This is one recorded day, not a live trading result."
         ),
     }
     (ARTIFACTS / "eval_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+    if device.type == "cuda":
+        print(f"peak GPU memory {torch.cuda.max_memory_allocated() / (1024 ** 2):.0f} MiB")
     return report
 
 
-def load_rows(base_url: str) -> tuple[list[tuple[list[float], int]], str]:
-    client = ModelClient(base_url, timeout=3.0)
-    try:
-        client.health()
-        account = client.account()
-    except Exception as error:
-        print(f"Model API is not available ({error}). Using the local BTCUSDT book ticker.")
-        return collect_from_tape(), "local book ticker, because the model API was not reachable"
-    if account.get("stakeCents") is not None:
-        print("A live session is open, so reset was not called. Using the local BTCUSDT book ticker.")
-        return collect_from_tape(), "local book ticker, because a live session was open"
-    return collect_from_api(client), "model API reset and step on BTC-USDT"
-
-
 def main() -> None:
-    rows, source = load_rows("http://localhost:3000")
-    if len(rows) <= HORIZON * 6:
-        raise SystemExit("Not enough rows to train.")
-    evaluate(rows, source)
+    evaluate()
 
 
 if __name__ == "__main__":

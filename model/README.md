@@ -10,12 +10,12 @@ python -m model.train
 python -m model.live
 ```
 
-`python -m model.train` calls `POST /v1/reset` and `POST /v1/step` on `BTC-USDT` when the server is idle. If a live session is open, or the server is down, it builds the same features from `hft/data/raw/BTCUSDT_20261001_book_ticker.csv.gz` instead. The network fits on CUDA when PyTorch can see the GPU, and the log prints the device name. Live quoting loads those weights on the CPU.
+`python -m model.train` fits on the local `BTCUSDT_20261001` book ticker plus Binance aggTrades for September 2026 (downloaded into `hft/data/extra` when missing). The evening of 2026-10-01, from the timestamp in `docs/model-issues.md`, is not used to fit weights or to pick the entry rule. The log says whether CUDA is working and, when it is, the GPU name. Live scoring loads the weights on the CPU.
 
-The held-out report is `model/artifacts/eval_report.json`. It compares the signal, after a 5 bps taker fee, with doing nothing. It covers one recorded day and is not a claim that the strategy makes money. The join-the-touch figure, when present, comes from `hft/run_backtest.py` and is a different simulator.
+The network predicts a forward return. The bot sends a taker order only when that return clears the entry level chosen on the afternoon slice, then holds for the forecast horizon. It does not rest on both sides of the touch. A `$5` stake can take a BTC lot: the rail check is a 50 bp adverse move plus the flatten fee, not the full notional of the coin. The held-out report is `model/artifacts/eval_report.json`. It is one recorded day, not a claim about live trading. The join-the-touch figure, when present, comes from `hft/run_backtest.py` and is a different simulator.
 
 The page owns the time limit and calls `POST /v1/stop`. The bot reads the floor and ceiling from the observation and stops quoting when the session is halted or the feed is `stale`.
 
-A `BTC-USDT` lot is `0.001` BTC, about `$83` of notional. The bot flattens instead of quoting when one lot would cross the floor or ceiling, so a `BTC-USDT` session needs room for a full lot on both sides, for example deposit `$100`, floor `$0`, ceiling `$200`. A `$50` deposit with a `$25` floor never quotes.
+A `BTC-USDT` lot is `0.001` BTC, about `$83` of notional. The bot will not add a lot when a 50 bp move plus the flatten fee would cross the floor or the ceiling. A `$5` deposit clears that check. The order is still one or more full lots, so a `$5` account can lose the whole deposit on a much smaller price move than the notional.
 
 The live loop tracks its own in-flight places and cancels from the `events` replies, decides at most every `100ms`, and uses a new `clientOrderId` prefix on every connection, because the server remembers every id it has seen. With no session open it pings every `5s` and prints `waiting for a live session` instead of reconnecting.
