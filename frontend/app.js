@@ -691,7 +691,14 @@ const live = {
   ws: null, session: null, finished: null, connected: false,
   stopping: false, stopWhy: null,
   timer: null, pingTimer: null, reconnectTimer: null, lastMsg: 0, actionsKey: null,
+  series: [], fillKeys: new Set(), markers: [], fillsKey: null,
 };
+const LIVE_SAMPLE_MS = 500; // one chart point per half second; the watch socket sends ~5 a second
+const LIVE_POINTS = 2400;   // past this, every other point is dropped so the whole session stays on the chart
+
+function resetLiveData() {
+  live.series = []; live.fillKeys = new Set(); live.markers = []; live.fillsKey = null;
+}
 
 async function startTrading() {
   if (state.active || startBusy) return;
@@ -710,6 +717,7 @@ async function startTrading() {
     };
     save();
     live.session = s; live.finished = null; live.stopping = false; live.stopWhy = null;
+    resetLiveData(); recordSample(s);
     openLiveModal(); connectWatch(); scheduleDuration();
   } catch (e) {
     if (e.code === 'offline') setStartError(`Can't reach the trading server at ${esc(API_BASE)}. Make sure it's running, then try again.`);
@@ -723,6 +731,7 @@ async function startTrading() {
 function resumeLive() {
   if (!state.active) return;
   live.session = null; live.finished = null; live.stopping = false; live.stopWhy = null;
+  resetLiveData();
   openLiveModal(); connectWatch(); scheduleDuration();
 }
 
@@ -740,13 +749,26 @@ function openLiveModal() {
       <div class="stat"><div class="label">Your investment now</div><div class="value" id="lv-stake"></div></div>
       <div class="stat"><div class="label">Result so far</div><div class="value" id="lv-pnl"></div></div>
     </div>
+    <div class="stats live-market">
+      <div class="stat"><div class="label">${esc(base)} price</div><div class="value" id="lv-mid">–</div></div>
+      <div class="stat"><div class="label">Fund is holding</div><div class="value" id="lv-pos">–</div></div>
+      <div class="stat"><div class="label">Trades</div><div class="value" id="lv-trades">0</div></div>
+    </div>
+    <div class="live-chart-head"><strong>Your investment</strong><span class="muted small" id="lv-span"></span></div>
+    <canvas class="live-chart" id="lv-chart-stake"></canvas>
+    <div class="live-chart-head">
+      <strong>${esc(base)} price</strong>
+      <span class="legend small muted"><i class="dot buy"></i>Fund bought <i class="dot sell"></i>Fund sold</span>
+    </div>
+    <canvas class="live-chart" id="lv-chart-price"></canvas>
+    <div class="live-chart-head"><strong>Recent trades</strong></div>
+    <div class="live-fills" id="lv-fills"><div class="muted small">No trades yet. The model trades small amounts, so this can take a moment.</div></div>
     <div class="summary">
       <div class="line"><span>Started with</span><strong>${moneyC(a.depositCents)}</strong></div>
       <div class="line"><span>Stops if it falls to</span><strong>${moneyC(a.floorCents)}</strong></div>
       <div class="line"><span>Stops if it grows to</span><strong>${moneyC(a.ceilingCents)}</strong></div>
       <div class="line"><span>Time</span><strong id="lv-time"></strong></div>
     </div>
-    <div class="live-graph-placeholder">Live graph goes here (next step)</div>
     <div class="small muted" id="lv-note"></div>
     <div class="field-error" id="lv-error"></div>
     <div class="modal-actions" id="lv-actions"></div>`);
@@ -780,6 +802,7 @@ function updateLive() {
   else timeTxt = fmtClock(Date.now() - a.startedAt) + ' · no time limit';
   setText('lv-time', timeTxt);
   setText('lv-note', fin ? (REASON_NOTES[fin.reason] || '') : '');
+  updateLiveMarket();
 
   // Only rebuild the buttons when their state changes, so clicks are never lost to a refresh.
   const key = fin ? 'fin' : live.stopping ? 'stopping' : 'run';
@@ -794,6 +817,150 @@ function updateLive() {
   }
 }
 function setLiveError(msg) { setText('lv-error', msg || ''); }
+
+const fillKey = f => [f.orderId, f.ts, f.side, f.price, f.size].join('|');
+
+// One chart point per LIVE_SAMPLE_MS from watch snapshots, plus every new fill as a price marker.
+function recordSample(s) {
+  const now = Date.now();
+  if (!live.series.length && Array.isArray(s.stakeHistory)) {
+    // A reopened popup starts from the server's short stake history instead of an empty chart.
+    for (const p of s.stakeHistory) {
+      const t = Date.parse(p.ts);
+      if (Number.isFinite(t) && t < now) live.series.push({ t, stake: p.stakeCents, mid: null });
+    }
+  }
+  const last = live.series[live.series.length - 1];
+  if (last && now - last.t < LIVE_SAMPLE_MS) {
+    last.stake = s.stakeCents; last.mid = s.midCents ?? last.mid;
+  } else {
+    live.series.push({ t: now, stake: s.stakeCents, mid: s.midCents ?? null });
+    if (live.series.length > LIVE_POINTS) {
+      const n = live.series.length;
+      live.series = live.series.filter((_, i) => i % 2 === 0 || i === n - 1);
+    }
+  }
+  for (const f of s.fills || []) {
+    const key = fillKey(f);
+    if (live.fillKeys.has(key)) continue;
+    live.fillKeys.add(key);
+    const t = Date.parse(f.ts);
+    live.markers.push({ t: Number.isFinite(t) ? t : now, v: f.price, side: f.side });
+  }
+}
+
+function lotsText(lots, base) {
+  if (!lots) return 'Nothing';
+  const coins = (Math.abs(lots) / 1000).toFixed(3) + ' ' + base;
+  return lots > 0 ? coins : coins + ' (short)';
+}
+
+function updateLiveMarket() {
+  const v = live.session;
+  if (!v) return;
+  const base = String(v.instrument || '').split('-')[0];
+  setText('lv-mid', v.midCents ? usd(v.midCents) : '–');
+  setText('lv-pos', lotsText(v.positionLots, base));
+  setText('lv-trades', String(live.fillKeys.size));
+
+  const pts = live.series;
+  setText('lv-span', pts.length > 1 ? 'last ' + fmtClock(pts[pts.length - 1].t - pts[0].t) : '');
+  drawLive(document.getElementById('lv-chart-stake'), pts.map(p => ({ t: p.t, v: p.stake })), {
+    fmt: c => moneyC(c), minSpan: 10, color: '#6c4cf1', area: true,
+    refs: [
+      { v: v.depositCents, label: 'start', color: '#9ca3af' },
+      { v: v.floorCents, label: 'floor', color: '#dc2626' },
+      { v: v.ceilingCents, label: 'target', color: '#16a34a' },
+    ],
+  });
+  const mids = pts.filter(p => p.mid != null).map(p => ({ t: p.t, v: p.mid }));
+  drawLive(document.getElementById('lv-chart-price'), mids, {
+    fmt: c => usd(c), minSpan: mids.length ? Math.max(2, mids[mids.length - 1].v * 0.0005) : 2,
+    color: '#0f766e', markers: live.markers,
+  });
+
+  const fills = v.fills || [];
+  const key = fills.length ? fillKey(fills[0]) + '#' + fills.length : '';
+  const box = document.getElementById('lv-fills');
+  if (box && fills.length && live.fillsKey !== key) {
+    live.fillsKey = key;
+    box.innerHTML = fills.slice(0, 6).map(f => {
+      const t = new Date(f.ts);
+      const when = Number.isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
+      const sig = f.signature ? `<span class="muted small" title="Solana transaction ${esc(f.signature)}">tx ${esc(f.signature.slice(0, 6))}…</span>` : '';
+      return `<div class="fill-row">
+        <span class="side ${f.side === 'buy' ? 'good' : 'bad'}">${f.side === 'buy' ? 'Bought' : 'Sold'}</span>
+        <span>${esc((f.size / 1000).toFixed(3))} ${esc(base)} at ${usd(f.price)}</span>
+        <span class="muted small">${esc(when)}</span>${sig}
+      </div>`;
+    }).join('');
+  }
+}
+
+/* Time-series line for the live popup. Points are { t: ms, v: number }.
+   refs are horizontal lines drawn only when they fall near the visible range. */
+function drawLive(canvas, pts, o) {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.font = '11px system-ui';
+  if (pts.length < 2) {
+    ctx.fillStyle = '#6b7280'; ctx.fillText('Waiting for live data…', 12, h / 2 + 4);
+    return;
+  }
+
+  const pad = { l: 78, r: 12, t: 10, b: 20 };
+  const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 1000);
+  const marks = (o.markers || []).filter(m => m.t >= t0 && m.t <= t1);
+  const vals = pts.map(p => p.v).concat(marks.map(m => m.v));
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < o.minSpan) { const mid = (hi + lo) / 2; lo = mid - o.minSpan / 2; hi = mid + o.minSpan / 2; }
+  const span = hi - lo;
+  const refs = (o.refs || []).filter(r => r.v != null && r.v >= lo - span && r.v <= hi + span);
+  for (const r of refs) { lo = Math.min(lo, r.v); hi = Math.max(hi, r.v); }
+  const pady = (hi - lo) * 0.08; lo -= pady; hi += pady;
+
+  const x = t => pad.l + ((t - t0) / (t1 - t0)) * (w - pad.l - pad.r);
+  const y = v => pad.t + (1 - (v - lo) / (hi - lo)) * (h - pad.t - pad.b);
+
+  ctx.strokeStyle = '#eceef3'; ctx.fillStyle = '#6b7280';
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + ((hi - lo) * i) / 3, yy = y(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
+    ctx.fillText(o.fmt(v), 6, yy + 4);
+  }
+  ctx.fillText('−' + fmtClock(t1 - t0), pad.l, h - 5);
+  ctx.fillText('now', w - pad.r - 22, h - 5);
+
+  for (const r of refs) {
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = r.color;
+    ctx.beginPath(); ctx.moveTo(pad.l, y(r.v)); ctx.lineTo(w - pad.r, y(r.v)); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle = r.color;
+    ctx.fillText(r.label, w - pad.r - ctx.measureText(r.label).width, y(r.v) - 3);
+  }
+
+  if (o.area) {
+    ctx.beginPath(); ctx.moveTo(x(pts[0].t), y(pts[0].v));
+    pts.forEach(p => ctx.lineTo(x(p.t), y(p.v)));
+    ctx.lineTo(x(pts[pts.length - 1].t), h - pad.b); ctx.lineTo(x(pts[0].t), h - pad.b); ctx.closePath();
+    ctx.fillStyle = 'rgba(108,76,241,0.10)'; ctx.fill();
+  }
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v))));
+  ctx.strokeStyle = o.color; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+
+  for (const m of marks) {
+    ctx.beginPath(); ctx.arc(x(m.t), y(m.v), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = m.side === 'buy' ? '#16a34a' : '#dc2626'; ctx.fill();
+  }
+  const lastP = pts[pts.length - 1];
+  ctx.beginPath(); ctx.arc(x(lastP.t), y(lastP.v), 3, 0, Math.PI * 2);
+  ctx.fillStyle = o.color; ctx.fill();
+}
 
 function connectWatch() {
   closeWatch();
@@ -831,6 +998,7 @@ function onSession(s) {
   if (!a) return;
   if (s.status === 'idle' || s.sessionId !== a.sessionId) { lostSession(); return; }
   live.session = s;
+  recordSample(s);
   if (s.status === 'halted') finalizeRun(s); else updateLive();
 }
 
@@ -896,6 +1064,7 @@ function scheduleDuration() {
 function closeLive() {
   closeWatch(); clearTimeout(live.timer);
   live.finished = null; live.session = null; live.stopping = false; live.stopWhy = null; live.actionsKey = null;
+  resetLiveData();
   closeModal();
   if (currentPath() === '/trading') renderTrading();
 }
@@ -978,6 +1147,7 @@ window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); })
 window.addEventListener('resize', () => {
   const canvas = $('#chart'), s = series(selectedCoin());
   if (canvas && s) drawChart(canvas, s.values);
+  if (modal === 'live') updateLive();
 });
 
 route();
