@@ -58,7 +58,7 @@ Optional environment variables:
 
 Open `http://127.0.0.1:3000/`. The page is served by this process. It can open a session, watch the stake, and stop. It cannot place orders.
 
-A session is a deposit of `$1` to `$100` pooled with a `$1000` house fund, plus a floor and a ceiling. While it is running, `ws://127.0.0.1:3000/v1/watch` pushes the stake, book, and fills. The full request shapes are in [docs/client-api.md](docs/client-api.md).
+A session is a deposit of `$1` to `$100` pooled with a `$100,000` house fund, plus a floor and a ceiling. While it is running, `ws://127.0.0.1:3000/v1/watch` pushes the stake, book, and fills. The full request shapes are in [docs/client-api.md](docs/client-api.md).
 
 ## Model
 

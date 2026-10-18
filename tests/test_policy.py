@@ -35,12 +35,12 @@ def test_tick_rounding_matches_btc_increment():
     assert round_tick(10400, 1, "buy") == 10400
 
 
-def call(obs, expected, held=0, horizon=300, ids=None):
-    return decide(obs, BTC, expected, 10.0, 0.0, horizon, held, ids or IdSource())
+def call(obs, expected, held=0, horizon=300, ids=None, idle_ms=0):
+    return decide(obs, BTC, expected, 10.0, 0.0, horizon, held, ids or IdSource(), idle_ms)
 
 
 def test_position_headroom_blocks_the_extra_lot():
-    decision = call(observation(positionLots=10), expected=40.0, held=300)
+    decision = call(observation(positionLots=1), expected=40.0, held=300)
     assert decision.orders == []
 
 
@@ -96,6 +96,109 @@ def test_near_rail_flattens_instead_of_quoting():
     decision = call(observation(stakeCents=20, floorCents=0, positionLots=1), expected=0.0)
     assert decision.flatten is True
     assert decision.orders == []
+
+
+def test_pace_repeats_on_each_five_second_window():
+    position = 0
+    ids = IdSource()
+    for _ in range(6):
+        decision = call(
+            observation(positionLots=position, stakeCents=100_000),
+            expected=1.5,
+            held=10,
+            idle_ms=5_000,
+            ids=ids,
+        )
+        assert decision.reason == "pace"
+        assert len(decision.orders) == 1
+        order = decision.orders[0]
+        assert order["size"] == 1
+        position += order["size"] if order["side"] == "buy" else -order["size"]
+    assert position == 6
+
+
+def test_btc_lot_is_not_frozen_for_an_hour():
+    # One lot is the whole $100 stake at $80k, and the old live path held it
+    # for 18_000 bars. Five seconds of silence still has to produce a trade.
+    book = observation(
+        mid=8_000_000,
+        bids=[{"price": 7_999_990, "size": 40}],
+        asks=[{"price": 8_000_000, "size": 25}],
+        positionLots=1,
+        stakeCents=10_000,
+        floorCents=0,
+        ceilingCents=20_000,
+    )
+    held = call(book, expected=40.0, held=50, horizon=18_000, idle_ms=4_999)
+    assert held.orders == []
+    decision = call(book, expected=40.0, held=50, horizon=18_000, idle_ms=5_000)
+    assert decision.reason == "pace"
+    assert decision.orders[0]["side"] == "sell"
+    assert decision.orders[0]["size"] == 1
+    # 80 bps of $80,000 is $64, past the few dollars the touch moves in 50ms.
+    assert decision.orders[0]["price"] <= 7_999_990 - 5_000
+    assert decision.orders[0]["price"] % 10 == 0
+
+
+def test_btc_buy_crosses_through_the_latency_gap():
+    decision = call(
+        observation(
+            mid=8_000_000,
+            bids=[{"price": 7_999_990, "size": 40}],
+            asks=[{"price": 8_000_000, "size": 25}],
+            stakeCents=10_000,
+            floorCents=0,
+            ceilingCents=20_000,
+        ),
+        expected=0.2,
+        idle_ms=5_000,
+    )
+    order = decision.orders[0]
+    assert order["side"] == "buy"
+    assert order["size"] == 1
+    assert order["type"] == "ioc"
+    assert order["price"] >= 8_000_000 + 5_000
+    assert order["price"] % 10 == 0
+
+
+def test_flat_book_trades_once_the_five_second_pace_is_due():
+    waiting = call(observation(), expected=0.0, idle_ms=4_999)
+    assert waiting.orders == []
+    decision = call(observation(), expected=0.0, idle_ms=5_000)
+    assert decision.reason == "pace"
+    assert decision.orders[0]["side"] == "buy"
+    assert decision.orders[0]["size"] == 1
+    assert decision.orders[0]["type"] == "ioc"
+
+
+def test_pace_follows_the_forecast_during_the_hold():
+    decision = call(observation(positionLots=2, stakeCents=100_000), expected=-4.0, held=10, idle_ms=5_000)
+    assert decision.orders[0]["side"] == "sell"
+    assert decision.orders[0]["size"] == 1
+
+
+def test_pace_peels_one_lot_at_the_position_cap():
+    decision = call(observation(positionLots=1), expected=30.0, held=10, idle_ms=5_000)
+    assert decision.orders[0]["side"] == "sell"
+    assert decision.orders[0]["size"] == 1
+
+
+def test_wide_sol_spread_still_trades_on_the_pace():
+    # 16 cents on a $104 mid is the SOL reference ladder, and it is wider than 5 bps.
+    decision = call(
+        observation(
+            market="SOL-USD",
+            mid=10_400,
+            bids=[{"price": 10_392, "size": 500}],
+            asks=[{"price": 10_408, "size": 500}],
+            stakeCents=2_000,
+        ),
+        expected=0.2,
+        idle_ms=5_000,
+    )
+    assert decision.orders
+    assert decision.orders[0]["size"] == 1
+    assert decision.reason == "pace"
 
 
 def test_rate_window_keeps_new_ids_under_the_documented_limit():

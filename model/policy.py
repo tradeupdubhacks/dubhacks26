@@ -12,8 +12,12 @@ from dataclasses import dataclass, field
 TAKER_BPS = 5
 MAKER_BPS = 2
 SHOCK_BPS = 50
-TARGET_CAP = 10
 WIDE_SPREAD_BPS = 5.0
+# A quiet book still crosses once per this window. The forecast chooses the side.
+TRADE_EVERY_MS = 5_000
+# The server sits on an order for 50ms. On the BTC tape the touch often moves
+# several dollars in that gap, and a limit at the old ask is canceled.
+LATENCY_CROSS_BPS = 80
 
 
 @dataclass
@@ -59,7 +63,7 @@ def shock_budget_cents(price: int, size: int) -> int:
 
 
 def lots_that_fit(price: int, room_cents: int, limit: int) -> int:
-    cap = max(0, min(limit, TARGET_CAP))
+    cap = max(0, limit)
     best = 0
     for size in range(1, cap + 1):
         if shock_budget_cents(price, size) < room_cents:
@@ -70,7 +74,7 @@ def lots_that_fit(price: int, room_cents: int, limit: int) -> int:
 
 
 def rail_capacity(observation: dict, price: int, limits: InstrumentLimits) -> int:
-    hard = min(limits.max_position_lots, TARGET_CAP)
+    hard = limits.max_position_lots
     stake = observation.get("stakeCents")
     if stake is None or price <= 0:
         return hard
@@ -122,6 +126,19 @@ class IdSource:
                 return client_order_id
 
 
+def crossing_price(side: str, bid: int, ask: int, tick: int, mid: int) -> int:
+    """IOC limit that still reaches the touch after the matching delay."""
+    price = aggressive_price(side, bid, ask, tick)
+    cushion = max(tick, mid * LATENCY_CROSS_BPS // 10_000)
+    if tick > 1:
+        cushion -= cushion % tick
+        if cushion < tick:
+            cushion = tick
+    if side == "buy":
+        return price + cushion
+    return max(tick, price - cushion)
+
+
 def aggressive_price(side: str, bid: int, ask: int, tick: int) -> int:
     if side == "buy":
         price = round_tick(ask, tick, "sell")
@@ -135,16 +152,39 @@ def aggressive_price(side: str, bid: int, ask: int, tick: int) -> int:
 
 
 def entry_lots(expected_bps: float, enter_bps: float, capacity: int) -> int:
-    if capacity < 1 or enter_bps <= 0:
+    """Use the whole stake, not a one-lot probe."""
+    if capacity < 1 or enter_bps <= 0 or abs(expected_bps) < enter_bps:
         return 0
-    multiple = abs(expected_bps) / enter_bps
-    if multiple < 1.5:
-        size = 1
-    elif multiple < 2.5:
-        size = min(4, capacity)
+    return capacity
+
+
+def deploy_lots(observation: dict, price: int, limits: InstrumentLimits) -> int:
+    """Lots whose notional matches the stake, capped by the rails and the instrument."""
+    allowed = rail_capacity(observation, price, limits)
+    if allowed < 1 or price <= 0:
+        return 0
+    stake = observation.get("stakeCents")
+    if stake is None:
+        return allowed
+    target = max(1, int(int(stake) * 1000 / price))
+    return max(1, min(target, allowed, limits.max_order_lots, limits.max_position_lots))
+
+
+def pace_lots(position: int, capacity: int, expected_bps: float) -> int:
+    """Step one lot with the forecast. At the cap, take one lot off so the next step can trade."""
+    cap = max(1, capacity)
+    if expected_bps > 0:
+        direction = 1
+    elif expected_bps < 0:
+        direction = -1
+    elif position > 0:
+        direction = -1
     else:
-        size = capacity
-    return max(1, min(size, capacity))
+        direction = 1
+    stepped = position + direction
+    if stepped > cap or stepped < -cap:
+        stepped = position - direction
+    return int(max(-cap, min(cap, stepped)))
 
 
 def desired_lots(
@@ -157,7 +197,7 @@ def desired_lots(
     capacity: int,
 ) -> int:
     """Target inventory. An open trade is held for the forecast horizon so fees are not paid twice."""
-    cap = max(0, min(capacity, TARGET_CAP))
+    cap = max(0, capacity)
     if cap < 1:
         return 0
     if position != 0 and 0 <= held_bars < horizon_bars:
@@ -208,6 +248,7 @@ def decide(
     horizon_bars: int,
     held_bars: int,
     ids: IdSource,
+    idle_ms: int = 0,
 ) -> Decision:
     if observation.get("halted"):
         return Decision(reason="halted")
@@ -221,14 +262,18 @@ def decide(
     bid, ask = book
     mid = int(observation.get("mid") or (bid + ask) // 2)
     position = int(observation.get("positionLots") or 0)
-    capacity = rail_capacity(observation, mid, limits)
+    capacity = deploy_lots(observation, mid, limits)
     if capacity < 1 and position == 0 and not _open_orders(observation):
         return Decision(reason="near_rail")
     if capacity < 1:
         return Decision(flatten=True, reason="near_rail")
 
     spread_bps = (ask - bid) / mid * 1e4 if mid else 0.0
-    if spread_bps > WIDE_SPREAD_BPS:
+    due = idle_ms >= TRADE_EVERY_MS
+    # A wide book used to return here for the whole session. BTC is tight, but a
+    # fill was then held for an hour, so both markets went quiet. The 5s pace
+    # still crosses either book.
+    if spread_bps > WIDE_SPREAD_BPS and not due:
         if position == 0 and not _open_orders(observation):
             return Decision(reason="wide_spread")
         desired = position
@@ -237,6 +282,12 @@ def decide(
             expected_bps, position, held_bars, enter_bps, exit_bps, horizon_bars, capacity
         )
     orders = _open_orders(observation)
+    paced = False
+    if due and not orders and desired == position and capacity >= 1:
+        nudged = pace_lots(position, capacity, expected_bps)
+        if nudged != position:
+            desired = nudged
+            paced = True
     delta = desired - position
     if orders:
         if delta == 0:
@@ -248,14 +299,6 @@ def decide(
             return Decision(cancels=[order["clientOrderId"] for order in (extras or orders)], reason="cancel")
         return Decision(reason="working")
     if delta == 0:
-        # #region agent log
-        try:
-            import json, time
-            with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-                _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "A", "location": "policy.py:decide", "message": "no order", "data": {"reason": "hold", "expectedBps": expected_bps, "enterBps": enter_bps, "position": position, "capacity": capacity, "orders": 0}, "timestamp": int(time.time() * 1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return Decision(reason="hold")
 
     side = "buy" if delta > 0 else "sell"
@@ -264,16 +307,15 @@ def decide(
         size -= 1
     if size < 1:
         return Decision(reason="position_limit")
-    price = aggressive_price(side, bid, ask, limits.price_tick_cents)
-    reason = "enter" if position == 0 else ("reverse" if desired * position < 0 else "exit")
-    # #region agent log
-    try:
-        import json, time
-        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "C", "location": "policy.py:decide", "message": "order", "data": {"reason": reason, "expectedBps": expected_bps, "enterBps": enter_bps, "side": side, "size": size, "orders": 1}, "timestamp": int(time.time() * 1000)}) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    price = crossing_price(side, bid, ask, limits.price_tick_cents, mid)
+    if paced:
+        reason = "pace"
+    elif position == 0:
+        reason = "enter"
+    elif desired * position < 0:
+        reason = "reverse"
+    else:
+        reason = "exit"
     return Decision(
         orders=[
             {

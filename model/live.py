@@ -8,14 +8,14 @@ import time
 
 import websockets
 
-from model.client import ModelClient
-from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
+from model.client import ApiError, ModelClient
+from model.policy import TRADE_EVERY_MS, Decision, IdSource, InstrumentLimits, decide, within_rate_limit
 from model.score import Scorer
 
 
 # Documented in docs/model-api.md. The client instrument payload does not repeat them.
 DOCUMENTED_LIMITS = {
-    "BTC-USDT": (10, 10),
+    "BTC-USDT": (100_000, 100_000),
     "SOL-USD": (2000, 10000),
 }
 
@@ -131,6 +131,9 @@ async def session(base_url: str) -> None:
     announced = False
     ready_announced = False
     entry_ts: int | None = None
+    last_trade_ts: int | None = None
+    last_trade_wall: float | None = None
+    seen_position: int | None = None
     last_sign = 0
     print(
         f"connected to {client.ws_url()}, enter {scorer.enter_bps:.1f} bps "
@@ -160,6 +163,9 @@ async def session(base_url: str) -> None:
             if observation.get("stakeCents") is None and not observation.get("halted"):
                 scorer.reset()
                 entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
                 last_sign = 0
                 announced = False
                 ready_announced = False
@@ -171,6 +177,11 @@ async def session(base_url: str) -> None:
                 print("live session found")
                 waiting = False
                 scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
                 announced = False
                 ready_announced = False
             now = loop.time()
@@ -182,6 +193,25 @@ async def session(base_url: str) -> None:
             if limits is None:
                 continue
             view = inflight.view(observation, now)
+            if scorer.bucket is not None and int(observation.get("ts") or 0) // scorer.bar_ms < scorer.bucket:
+                # The clock went back: a new session replaced the old one. Load its history too.
+                scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
+                announced = False
+                ready_announced = False
+            if scorer.bucket is None:
+                # Start from the server's bar history instead of waiting two minutes to build one.
+                try:
+                    history = client.bars()
+                    if history.get("market") == symbol:
+                        loaded = scorer.seed(history.get("bars") or [])
+                        print(f"loaded {loaded} bars of price history from the server")
+                except ApiError as error:
+                    print(f"no bar history ({error.code}), building the window live")
             expected = scorer.update(observation)
             if not scorer.ready and not announced:
                 print("waiting 2 minutes for a price window before sending orders")
@@ -201,15 +231,30 @@ async def session(base_url: str) -> None:
                 entry_ts = ts
             last_sign = sign
             held = 0 if entry_ts is None else max(0, (ts - entry_ts) // scorer.bar_ms)
+            # One BTC lot is the whole stake. Holding that fill for the forecast
+            # horizon (or an hour) is why BTC went as quiet as SOL. A position
+            # may sit for 5s, and the clock starts when the position changes,
+            # so a canceled IOC does not count as a trade.
+            if seen_position is None:
+                seen_position = position
+            elif position != seen_position:
+                last_trade_ts = ts
+                last_trade_wall = now
+                seen_position = position
+            market_idle = TRADE_EVERY_MS if last_trade_ts is None else max(0, ts - last_trade_ts)
+            wall_idle = TRADE_EVERY_MS if last_trade_wall is None else max(0.0, (now - last_trade_wall) * 1000)
+            idle_ms = int(max(market_idle, wall_idle))
+            horizon = max(1, TRADE_EVERY_MS // max(1, scorer.bar_ms))
             decision = decide(
                 view,
                 limits,
                 expected,
                 scorer.enter_bps,
                 scorer.exit_bps,
-                scorer.horizon_bars,
+                horizon,
                 held,
                 ids,
+                idle_ms,
             )
             if decision.reason == "halted":
                 if not halted:

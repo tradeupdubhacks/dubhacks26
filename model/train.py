@@ -356,14 +356,6 @@ def choose_rule(expected: np.ndarray, bid: np.ndarray, ask: np.ndarray, mid: np.
                 if best is None or candidate["pnl_cents"] > best["pnl_cents"]:
                     best = candidate
     if best is None:
-        # #region agent log
-        try:
-            import json, time
-            with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-                _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "B", "location": "train.py:choose_rule", "message": "flat rule", "data": rejected, "timestamp": int(time.time() * 1000), "runId": "post-fix"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return {
             "horizon_index": 2,
             "horizon_bars": HORIZONS[2],
@@ -378,14 +370,6 @@ def choose_rule(expected: np.ndarray, bid: np.ndarray, ask: np.ndarray, mid: np.
             "flat": True,
         }
     best["flat"] = False
-    # #region agent log
-    try:
-        import json, time
-        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "B", "location": "train.py:choose_rule", "message": "trading rule", "data": {"enterBps": best["enter_bps"], "exitBps": best["exit_bps"], "horizonBars": best["horizon_bars"], "entries": best["entries"], "pnlCents": best["pnl_cents"], "rejected": rejected}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return best
 
 
@@ -610,14 +594,6 @@ def evaluate() -> dict:
         if rule.get("flat")
         else "The entry level is the calibration rule with the highest pnl after taker fees, among rules that placed orders."
     )
-    # #region agent log
-    try:
-        import json, time
-        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "D", "location": "train.py:evaluate", "message": "unseen", "data": {"enterBps": rule["enter_bps"], "entries": scored["entries"], "fills": scored["fills"], "pnlCents": scored["pnl_cents"], "feesCents": scored["fees_cents"], "hours": round(hours, 2), "flat": bool(rule.get("flat"))}, "timestamp": int(time.time() * 1000), "runId": "post-fix"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     network = network.to("cpu")
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     torch.save(

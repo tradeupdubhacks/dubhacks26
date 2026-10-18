@@ -162,6 +162,15 @@ export async function buildApp(options?: {
     return reply.code(result.status).send(result.body)
   })
   app.get('/v1/schema', async () => schemas)
+  app.get('/v1/bars', async (request, reply) => {
+    const query = isRecord(request.query) ? request.query : {}
+    const raw = stringQuery(query.limit)
+    const limit = raw === undefined || raw === '' ? 601 : Number(raw)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 601) {
+      return reply.code(400).send({ error: { code: 'bad_limit', message: 'limit must be an integer from 1 to 601.' } })
+    }
+    return market.barsView(limit)
+  })
   app.get('/v1/book', async () => {
     const view = market.observation()
     return {

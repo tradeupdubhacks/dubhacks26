@@ -1,4 +1,4 @@
-export const HOUSE_CENTS = 100_000
+export const HOUSE_CENTS = 10_000_000
 export const DEPOSIT_MIN = 100
 export const DEPOSIT_MAX = 10_000
 export const MAKER_BPS = 2
@@ -39,8 +39,8 @@ export const INSTRUMENTS: readonly Instrument[] = [
     quote: 'USD',
     priceTickCents: 10,
     lotSize: '0.001',
-    maxOrderLots: 10,
-    maxPositionLots: 10,
+    maxOrderLots: 100_000,
+    maxPositionLots: 100_000,
     data: 'replay',
     tape: 'BTCUSDT_20261001',
   },

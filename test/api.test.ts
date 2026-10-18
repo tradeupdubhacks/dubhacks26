@@ -26,7 +26,7 @@ describe('gateway', () => {
     assert.equal(health.statusCode, 200)
     assert.equal(health.json().execution, 'fake')
     const instruments = await app.inject({ method: 'GET', url: '/v1/instruments' })
-    assert.equal(instruments.json().houseFundCents, 100_000)
+    assert.equal(instruments.json().houseFundCents, 10_000_000)
     assert.ok(instruments.json().instruments.some((item: { symbol: string }) => item.symbol === 'SOL-USD'))
     const session = await app.inject({ method: 'GET', url: '/v1/session' })
     assert.deepEqual(session.json(), { status: 'idle' })
@@ -361,7 +361,7 @@ describe('order lifecycle', () => {
       payload: {
         dtMs: 100,
         orders: [
-          { clientOrderId: 'big', side: 'buy', size: 10, type: 'limit', price: 10 },
+          { clientOrderId: 'big', side: 'buy', size: 100_000, type: 'limit', price: 10 },
           { clientOrderId: 'over', side: 'buy', size: 1, type: 'limit', price: 10 },
         ],
       },
