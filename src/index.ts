@@ -7,9 +7,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const port = Number(process.env.PORT ?? 3000)
 const host = process.env.HOST ?? '0.0.0.0'
 
-const chain = process.env.NO_CHAIN
-  ? null
-  : new LocalSolana(process.env.SOLANA_RPC ?? 'http://127.0.0.1:8899', join(root, '.local-solana'))
+const chain = process.env.USE_CHAIN
+  ? new LocalSolana(process.env.SOLANA_RPC ?? 'http://127.0.0.1:8899', join(root, '.local-solana'))
+  : null
 
 if (chain) {
   try {
