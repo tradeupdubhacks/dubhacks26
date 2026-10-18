@@ -30,8 +30,10 @@ The BTC replay files are already in `hft/data/raw/` (`BTCUSDT_20261001_book_tick
 ## Start
 
 ```bash
-npm start
+USE_CHAIN=1 npm start
 ```
+
+Without `USE_CHAIN`, the server skips the validator and fills are faked (`/v1/health` reports `"execution":"fake"`).
 
 The HTTP server listens on `http://127.0.0.1:3000`. On startup it launches `solana-test-validator` at `http://127.0.0.1:8899` and creates two dummy token accounts under `.local-solana/`. The first start can take about half a minute. Validator logs go to `.local-solana/validator.log`.
 
@@ -47,6 +49,7 @@ Optional environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `USE_CHAIN` | unset | Set to any value to start the validator and settle fills on it |
 | `PORT` | `3000` | HTTP and WebSocket port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `SOLANA_RPC` | `http://127.0.0.1:8899` | Validator the gateway settles against |

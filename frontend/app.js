@@ -1,7 +1,8 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const API_BASE = 'http://localhost:3000'; // trading server (client API)
+// trading server (client API): the origin that served this page, or a local server when opened from disk
+const API_BASE = location.protocol.startsWith('http') ? location.origin : 'http://127.0.0.1:3000';
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const STORAGE_KEY = 'shopState.v2';
 const HISTORY_DAYS = 90;
