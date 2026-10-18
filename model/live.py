@@ -15,8 +15,10 @@ from model.policy import (
     TRADE_EVERY_MS,
     Decision,
     IdSource,
+    HybridConfig,
     InstrumentLimits,
     decide,
+    decide_hybrid,
     within_rate_limit,
 )
 from model.score import Scorer
@@ -48,6 +50,11 @@ def limits_for(symbol: str, instruments: dict) -> InstrumentLimits | None:
 DECISION_INTERVAL = 0.1
 # With no live session the server sends one snapshot and then nothing.
 IDLE_PING = 5.0
+# Sessions this bot trades. The server tags each live session with a strategy; "fast"
+# sessions belong to model/hft.py. None is an older server that sends no strategy.
+OWN_STRATEGIES = (None, "safe")
+# A price window that is not full is reloaded from GET /v1/bars at most this often.
+SEED_RETRY_S = 2.0
 # Forget an in-flight command the server never confirmed.
 INFLIGHT_TTL = 2.0
 TERMINAL = ("canceled", "filled")
@@ -129,12 +136,22 @@ async def session(base_url: str) -> None:
         for item in client.instruments()["instruments"]
     }
     scorer = Scorer()
+    policy_name = model_policy()
+    hybrid = hybrid_config()
+    if policy_name == "hybrid":
+        print(
+            f"policy: hybrid. long {hybrid.lots} lots when the forecast is >= {scorer.enter_bps:g} bps and the book "
+            f"leans {hybrid.enter_imbalance:g}; out when it is < {hybrid.exit_bps:g} bps or leans -{hybrid.exit_imbalance:g}"
+        )
+    else:
+        print("policy: pace (scale in and hold)")
     # The server remembers every id, including ones from an earlier connection.
     ids = IdSource(prefix=f"bot{int(time.time() * 1000):x}")
     inflight = InFlight()
     sent_at: list[float] = []
     loop = asyncio.get_running_loop()
     last_decision = 0.0
+    last_seed = float("-inf")
     waiting = False
     halted = False
     announced = False
@@ -169,7 +186,9 @@ async def session(base_url: str) -> None:
             observation = message.get("observation")
             if observation is None:
                 continue
-            if observation.get("stakeCents") is None and not observation.get("halted"):
+            owner = observation.get("strategy")
+            foreign = owner is not None and owner not in OWN_STRATEGIES
+            if foreign or (observation.get("stakeCents") is None and not observation.get("halted")):
                 scorer.reset()
                 entry_ts = None
                 last_trade_ts = None
@@ -179,7 +198,10 @@ async def session(base_url: str) -> None:
                 announced = False
                 ready_announced = False
                 if not waiting:
-                    print("waiting for a live session. Open one from the page.")
+                    if foreign:
+                        print(f"this session uses the {owner} strategy, which the hft bot trades. waiting for a safe session.")
+                    else:
+                        print("waiting for a live session. Open one from the page.")
                     waiting = True
                 continue
             if waiting:
@@ -212,11 +234,15 @@ async def session(base_url: str) -> None:
                 last_sign = 0
                 announced = False
                 ready_announced = False
-            if scorer.bucket is None:
+            if scorer.bucket is None or (not scorer.ready and now - last_seed >= SEED_RETRY_S):
                 # Start from the server's bar history instead of waiting two minutes to build one.
+                # A session that replaces another can leave stale bars ahead of the new clock,
+                # and the window then empties itself. Reload whenever it is not full.
+                last_seed = now
                 try:
                     history = client.bars()
                     if history.get("market") == symbol:
+                        scorer.reset()
                         loaded = scorer.seed(history.get("bars") or [])
                         print(f"loaded {loaded} bars of price history from the server")
                 except ApiError as error:
@@ -226,10 +252,13 @@ async def session(base_url: str) -> None:
                 print("price history is still filling. buys still go out on the 5s pace")
                 announced = True
             elif scorer.ready and not ready_announced:
-                print(
-                    f"price window ready. adding while the forecast stays above "
-                    f"{-HARD_EXIT_BPS:.0f} bps, then holding"
-                )
+                if policy_name == "hybrid":
+                    print(f"price window ready. buying when the forecast is >= {scorer.enter_bps:g} bps and the book leans up")
+                else:
+                    print(
+                        f"price window ready. adding while the forecast stays above "
+                        f"{-HARD_EXIT_BPS:.0f} bps, then holding"
+                    )
                 ready_announced = True
             position = int(observation.get("positionLots") or 0)
             sign = (position > 0) - (position < 0)
@@ -253,17 +282,20 @@ async def session(base_url: str) -> None:
             wall_idle = TRADE_EVERY_MS if last_trade_wall is None else max(0.0, (now - last_trade_wall) * 1000)
             idle_ms = int(max(market_idle, wall_idle))
             horizon = max(1, TRADE_EVERY_MS // max(1, scorer.bar_ms))
-            decision = decide(
-                view,
-                limits,
-                expected,
-                scorer.enter_bps,
-                scorer.exit_bps,
-                horizon,
-                held,
-                ids,
-                idle_ms,
-            )
+            if policy_name == "hybrid":
+                decision = decide_hybrid(view, limits, expected, scorer.enter_bps, ids, hybrid)
+            else:
+                decision = decide(
+                    view,
+                    limits,
+                    expected,
+                    scorer.enter_bps,
+                    scorer.exit_bps,
+                    horizon,
+                    held,
+                    ids,
+                    idle_ms,
+                )
             if decision.reason == "halted":
                 if not halted:
                     print("session halted, not sending orders")
@@ -282,6 +314,27 @@ async def session(base_url: str) -> None:
 
 
 STRATEGIES = ("model", "hft")
+POLICIES = ("hybrid", "pace")
+
+
+def model_policy() -> str:
+    """Feature flag for BOT_STRATEGY=model. MODEL_POLICY=hybrid (default) is forecast plus book
+    imbalance (decide_hybrid). MODEL_POLICY=pace is the scale-in-and-hold policy (decide)."""
+    name = os.environ.get("MODEL_POLICY", "hybrid").strip().lower() or "hybrid"
+    if name not in POLICIES:
+        raise SystemExit(f"Unknown MODEL_POLICY {name!r}. Use one of: {', '.join(POLICIES)}.")
+    return name
+
+
+def hybrid_config() -> HybridConfig:
+    base = HybridConfig()
+    return HybridConfig(
+        lots=int(os.environ.get("HYBRID_LOTS", base.lots)),
+        enter_imbalance=float(os.environ.get("HYBRID_ENTER_IMBALANCE", base.enter_imbalance)),
+        exit_imbalance=float(os.environ.get("HYBRID_EXIT_IMBALANCE", base.exit_imbalance)),
+        exit_bps=float(os.environ.get("HYBRID_EXIT_BPS", base.exit_bps)),
+        max_leverage=float(os.environ.get("HYBRID_MAX_LEVERAGE", base.max_leverage)),
+    )
 
 
 def strategy() -> str:

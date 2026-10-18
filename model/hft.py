@@ -35,6 +35,11 @@ from model.client import ModelClient
 from model.policy import Decision, IdSource, InstrumentLimits, aggressive_price, position_allows
 
 
+# Sessions this bot trades. The server tags each live session with a strategy; only
+# "fast" sessions are this bot's, so it can run next to the trained model.
+OWN_STRATEGIES = ("fast",)
+
+
 @dataclass
 class HftConfig:
     enter_imbalance: float = 0.6
@@ -220,11 +225,16 @@ async def session(base_url: str) -> None:
             observation = message.get("observation") if kind == "snapshot" else None
             if observation is None:
                 continue
-            if observation.get("stakeCents") is None and not observation.get("halted"):
+            owner = observation.get("strategy")
+            live = observation.get("stakeCents") is not None or observation.get("halted")
+            if not live or owner not in OWN_STRATEGIES:
                 trader.reset()
                 last_ts = None
                 if not waiting:
-                    print("waiting for a live session. Open one from the page.")
+                    if live:
+                        print(f"this session uses the {owner or 'default'} strategy, which the trained model trades. waiting for a fast session.")
+                    else:
+                        print("waiting for a fast session. Open one from the page.")
                     waiting = True
                 continue
             ts = int(observation.get("ts") or 0)

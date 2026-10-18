@@ -19,6 +19,7 @@ interface Socket {
 import { loadHistory } from './history.js'
 import { fetchSolMid } from './price.js'
 import { schemas } from './schema.js'
+import type { LiveBtcSource } from './tape.js'
 import type { FeeModel } from './types.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -38,11 +39,13 @@ export async function buildApp(options?: {
   /** Starts and stops the model process as sessions open and end (see bot.ts). */
   bot?: BotControl | null
   feeModel?: FeeModel
+  btcFeed?: LiveBtcSource | null
 }): Promise<App> {
   const market = new Market(
     options?.tapeDir ?? join(root, 'hft', 'data', 'raw'),
     options?.chain ?? null,
     options?.feeModel ?? 'exchange',
+    options?.btcFeed ?? null,
   )
   const app = Fastify({ logger: options?.logger ?? false })
   const watchers = new Set<Socket>()
@@ -174,7 +177,7 @@ export async function buildApp(options?: {
     execution: options?.chain ? 'solana' : 'fake',
     ...(options?.chain ? { chain: options.chain.snapshot() } : {}),
   }))
-  app.get('/v1/instruments', async () => instrumentsBody(market.feeView()))
+  app.get('/v1/instruments', async () => instrumentsBody(market.feeView(), market.btcFeedAttached))
   app.get('/v1/history', async (request, reply) => {
     const query = isRecord(request.query) ? request.query : {}
     const result = await loadHistory(

@@ -20,6 +20,37 @@ A `BTC-USDT` lot is `0.001` BTC, about `$83` of notional. The bot will not add a
 
 The live loop tracks its own in-flight places and cancels from the `events` replies, decides at most every `100ms`, and uses a new `clientOrderId` prefix on every connection, because the server remembers every id it has seen. With no session open it pings every `5s` and prints `waiting for a live session` instead of reconnecting.
 
+## Model policy
+
+`BOT_STRATEGY=model` (the default) runs the trained network. `MODEL_POLICY` picks how its forecast becomes orders:
+
+| `MODEL_POLICY` | Policy |
+| --- | --- |
+| `hybrid` (default) | `decide_hybrid` in `model/policy.py`. Long when the forecast and the order book agree. |
+| `pace` | `decide`. Buy one clip every 5s and hold, the earlier policy. |
+
+**How `hybrid` trades:**
+
+- **Enter** when flat: buy `HYBRID_LOTS` (default `200`) with an IOC at the ask, when the forecast is at least the weights' `enter_bps` (2 bps) and the top-of-book imbalance `(bid size - ask size) / (bid size + ask size)` is at least `HYBRID_ENTER_IMBALANCE` (default `0.6`).
+- **Exit** everything when the forecast drops below `HYBRID_EXIT_BPS` (default `0`), or the imbalance falls to `-HYBRID_EXIT_IMBALANCE` (default `0.6`) or lower.
+- **Size** is capped at `HYBRID_MAX_LEVERAGE` times the stake (default `200`), so a small stake trades fewer lots.
+
+It only holds longs. On `SOL-USD` the server's quotes are a synthetic ladder with equal sizes, so the imbalance is always 0 and the policy does not trade.
+
+**Results.** The policy was tuned with 20-minute simulations through the server on 26 windows of recorded BTCUSDT, with `FEE_MODEL=solana`, a $100 deposit, $0 floor and $105 ceiling. It reached +$5 in all 26:
+
+- The median time to +$5 was 2.3 minutes. The slowest was 17.7 minutes.
+- The deepest dip on the way was -$2.03.
+- A live session hit +$5.68 in 5 minutes 55 seconds.
+
+**What does the work.** The book imbalance produces the profit. The same rule without the forecast also reached +$5 in all 26 windows, faster (median 1.3 minutes), but dipped to -$5.89. The forecast mostly keeps the bot out when the lean is not backed by a longer move. The `pace` policy alone did not reach +$5 in any window.
+
+**Limits:**
+
+- Fills happen at the recorded top of book after the server's 50ms latency, with no competition for the queue.
+- The results depend on `FEE_MODEL=solana`. Exchange fees on 200 lots would erase the gains.
+- The data is one recorded day plus one hour, and live `BTC-USDT` sessions replay that same day.
+
 ## Choosing the bot
 
 `BOT_STRATEGY` picks which bot `python -m model.live` runs. Leaving it unset is the same as `model`.

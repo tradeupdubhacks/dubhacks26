@@ -604,3 +604,120 @@ describe('fee model', () => {
     }
   })
 })
+
+describe('session strategy', () => {
+  it('defaults to the safe strategy on BTC-USDT and reports it to the page and the bots', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      const { app } = built
+      const opened = await app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 10_500 } })
+      assert.equal(opened.statusCode, 201)
+      assert.equal(opened.json().instrument, 'BTC-USDT')
+      assert.equal(opened.json().strategy, 'safe')
+      const observation = (await app.inject({ method: 'GET', url: '/v1/account' })).json()
+      assert.equal(observation.strategy, 'safe')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('accepts the fast strategy and refuses an unknown one', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      const { app } = built
+      const bad = await app.inject({
+        method: 'POST',
+        url: '/v1/session',
+        payload: { depositCents: 10_000, ceilingCents: 10_500, strategy: 'yolo' },
+      })
+      assert.equal(bad.statusCode, 400)
+      assert.equal(bad.json().error.code, 'bad_strategy')
+      const fast = await app.inject({
+        method: 'POST',
+        url: '/v1/session',
+        payload: { depositCents: 10_000, ceilingCents: 10_500, strategy: 'fast' },
+      })
+      assert.equal(fast.statusCode, 201)
+      assert.equal(fast.json().strategy, 'fast')
+      assert.equal((await app.inject({ method: 'GET', url: '/v1/session' })).json().strategy, 'fast')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('reports no strategy outside a live session', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      await built.app.inject({ method: 'POST', url: '/v1/reset', payload: { instrument: 'BTC-USDT' } })
+      assert.equal((await built.app.inject({ method: 'GET', url: '/v1/account' })).json().strategy, null)
+    } finally {
+      await built.close()
+    }
+  })
+})
+
+describe('live BTC feed', () => {
+  class FakeFeed {
+    stale = false
+    ready = true
+    book = { bid: 8_000_000, bidSize: 300, ask: 8_000_010, askSize: 200 }
+    get available() { return this.ready && !this.stale }
+    async open() { return { ...this.book, trade: null } }
+    async advance() { return { ...this.book, trade: null } }
+    rebase() {}
+    async close() {}
+    history(count: number) {
+      return Array.from({ length: Math.min(count, 50) }, (_, i) => ({ ...this.book, bid: this.book.bid - 10 * (50 - i), ask: this.book.ask - 10 * (50 - i), trade: null }))
+    }
+  }
+
+  it('gives a live BTC session the feed, its history, and no fast-forward', async () => {
+    const feed = new FakeFeed()
+    const built = await buildApp({ clock: false, btcFeed: feed })
+    try {
+      const { app } = built
+      const btc = (await app.inject({ method: 'GET', url: '/v1/instruments' })).json().instruments.find((i: { symbol: string }) => i.symbol === 'BTC-USDT')
+      assert.equal(btc.data, 'live')
+      const opened = await app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 10_500 } })
+      assert.equal(opened.statusCode, 201)
+      assert.equal(opened.json().priceSource, 'binance')
+      assert.equal(opened.json().midCents, 8_000_005)
+      const bars = (await app.inject({ method: 'GET', url: '/v1/bars' })).json().bars
+      assert.equal(bars.length, 50)
+      assert.equal(bars[bars.length - 1].ts, 0)
+      const step = await app.inject({ method: 'POST', url: '/v1/step', payload: { dtMs: 200 } })
+      assert.equal(step.statusCode, 409)
+      assert.equal(step.json().error.code, 'step_not_for_live_feed')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('refuses a BTC session while the feed has no prices, and trains on the tape', async () => {
+    const feed = new FakeFeed()
+    feed.ready = false
+    const built = await buildApp({ clock: false, btcFeed: feed })
+    try {
+      const { app } = built
+      const refused = await app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 10_500 } })
+      assert.equal(refused.statusCode, 503)
+      assert.equal(refused.json().error.code, 'feed_unavailable')
+      const reset = await app.inject({ method: 'POST', url: '/v1/reset', payload: { instrument: 'BTC-USDT' } })
+      assert.equal(reset.json().observation.priceSource, 'tape')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('turns Binance messages into cents and 0.001 BTC lots', async () => {
+    const { BinanceBtcFeed } = await import('../src/binance.js')
+    const feed = new BinanceBtcFeed()
+    feed.receive(JSON.stringify({ data: { e: 'bookTicker', b: '81330.80', B: '6.877', a: '81330.90', A: '2.047' } }))
+    feed.receive(JSON.stringify({ data: { e: 'trade', p: '81330.90', q: '0.015', m: false, X: 'MARKET' } }))
+    assert.deepEqual(await feed.advance(0), {
+      bid: 8_133_080, bidSize: 6_877, ask: 8_133_090, askSize: 2_047, trade: { price: 8_133_090, size: 15, side: 'buy' },
+    })
+    assert.equal((await feed.advance(200)).trade, null)
+    assert.equal(feed.available, true)
+  })
+})

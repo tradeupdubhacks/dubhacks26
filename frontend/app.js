@@ -21,7 +21,7 @@ const PRODUCTS = [
 // from GET /v1/history (see loadHistory). The seeded series below is only a fallback.
 const COIN_META = {
   BTC: { name: 'Bitcoin', seed: 22, drift: 0.0008, vol: 0.025,
-    notes: ['Steadier of the two: smaller swings', 'Tends to lead the rest of the crypto market'] },
+    notes: ['Tends to lead the rest of the crypto market'] },
   SOL: { name: 'Solana', seed: 11, drift: 0.0010, vol: 0.040,
     notes: ['Bigger swings than Bitcoin', 'Moves with overall crypto sentiment'] },
 };
@@ -53,6 +53,16 @@ let market = {
     { symbol: 'SOL-USD', base: 'SOL', data: 'live' },
   ],
 };
+
+// Every session trades Bitcoin. The user picks which bot runs it; the server tags the
+// session with the strategy, and each bot trades only its own sessions.
+const TRADE_SYMBOL = 'BTC-USDT';
+// fast: the rule-based high-frequency bot (model/hft.py). safe: the trained model.
+const STRATEGIES = [
+  { id: 'fast', name: 'Faster', tag: 'high risk', tagClass: 'high' },
+  { id: 'safe', name: 'Slower', tag: 'low risk', tagClass: 'low' },
+];
+const strategyOf = id => STRATEGIES.find(x => x.id === id) || STRATEGIES[1];
 
 /* ============================================================
    FAKE HISTORY GENERATION (seeded so charts stay stable)
@@ -181,7 +191,7 @@ function refreshHistoryUI() {
    ============================================================ */
 const defaultState = () => ({
   cart: {},                 // productId -> qty
-  trade: { symbol: 'SOL-USD', amount: null, maxLoss: 20, target: 5, hours: 0, minutes: 0 },
+  trade: { symbol: TRADE_SYMBOL, strategy: 'safe', amount: null, maxLoss: 20, target: 5, hours: 0, minutes: 0 },
   runs: [],                 // finished trading sessions for this order
   active: null,             // the trading session running right now
   ended: false,             // true once END SESSION is confirmed
@@ -276,10 +286,8 @@ async function loadMarket() {
       fees: r.fees,
       instruments: r.instruments,
     };
-    if (!market.instruments.some(i => i.symbol === state.trade.symbol)) {
-      state.trade.symbol = market.instruments[0].symbol;
-      save();
-    }
+    const symbol = market.instruments.some(i => i.symbol === TRADE_SYMBOL) ? TRADE_SYMBOL : market.instruments[0].symbol;
+    if (state.trade.symbol !== symbol) { state.trade.symbol = symbol; save(); }
     market.instruments.forEach(loadHistory);
     if (currentPath() === '/trading' && modal !== 'live') renderTrading();
   } finally { loadingMarket = false; }
@@ -336,7 +344,8 @@ function ensureTradeDefaults() {
   const t = state.trade, min = minInvestC(), max = maxInvestC();
   if (t.amount == null) t.amount = Math.min(Math.max(Math.round(cartTotalC() * 0.10), min), max) / 100;
   else if (Math.round(t.amount * 100) > max) t.amount = max / 100;
-  if (!market.instruments.some(i => i.symbol === t.symbol)) t.symbol = market.instruments[0].symbol;
+  t.symbol = market.instruments.some(i => i.symbol === TRADE_SYMBOL) ? TRADE_SYMBOL : market.instruments[0].symbol;
+  if (!STRATEGIES.some(x => x.id === t.strategy)) t.strategy = 'safe';
 }
 
 function validateTrade() {
@@ -460,7 +469,8 @@ function sessionCardHTML() {
     </div>`;
 }
 function runRowHTML(r) {
-  return `<div class="run-row"><span>${esc(r.symbol.split('-')[0])} · ${esc(REASONS[r.reason] || r.reason)}</span>
+  const name = r.strategy ? ' · ' + strategyOf(r.strategy).name : '';
+  return `<div class="run-row"><span>${esc(r.symbol.split('-')[0])}${esc(name)} · ${esc(REASONS[r.reason] || r.reason)}</span>
     <strong class="${r.pnlCents >= 0 ? 'good' : 'bad'}">${signedC(r.pnlCents)}</strong></div>`;
 }
 
@@ -469,7 +479,7 @@ function renderTrading() {
   if (!orderC) { location.hash = '#/'; return; }
   ensureTradeDefaults();
   market.instruments.forEach(loadHistory);
-  const t = state.trade, c = selectedCoin(), list = coins(), mv = maxVol();
+  const t = state.trade, c = selectedCoin();
   const s = series(c), st = s && s.stats;
   const minC = minInvestC(), maxC = maxInvestC(), f = market.fees;
   const capped = orderC > market.depositMax;
@@ -477,9 +487,9 @@ function renderTrading() {
   const notes = [
     ...c.notes,
     c.data === 'replay' ? 'Prices replay recorded market data.' : 'Follows the live market price.',
-    f.makerBps || f.takerBps
-      ? `Fees of ${pct(f.makerBps / 10000, 2)} to ${pct(f.takerBps / 10000, 2)} per trade are already included in your results.`
-      : `No exchange fee. Each fill pays a Solana network fee of about ${(f.solanaFeeCents || 0).toFixed(1)} cents, already included in your results.`,
+    f.model === 'solana'
+      ? `Each trade pays only a Solana network fee of about ${(f.solanaFeeCents || 0.1).toFixed(2)}¢, already included in your results.`
+      : `Fees of ${pct(f.makerBps / 10000, 2)} to ${pct(f.takerBps / 10000, 2)} per trade are already included in your results.`,
   ];
 
   app.innerHTML = `
@@ -490,14 +500,14 @@ function renderTrading() {
         <!-- LEFT COLUMN -->
         <div class="stack">
           <div class="card">
-            <h3>Select crypto</h3>
+            <h3>Choose a strategy</h3>
             <div class="crypto-list">
-              ${list.map(x => `
-                <button class="crypto-item ${x.symbol === c.symbol ? 'active' : ''}" data-action="select-crypto" data-id="${esc(x.symbol)}">
-                  <span><strong>${esc(x.base)}</strong> <span class="muted small">${esc(x.name)}</span></span>
-                  ${volTag(x, 'vol')}
+              ${STRATEGIES.map(x => `
+                <button class="crypto-item strategy-item ${x.id === t.strategy ? 'active' : ''}" data-action="select-strategy" data-id="${esc(x.id)}">
+                  <span class="strategy-head"><strong>${esc(x.name)}</strong> <span class="tag ${x.tagClass}">${esc(x.tag)}</span></span>
                 </button>`).join('')}
             </div>
+            <span class="hint" style="margin-bottom:12px">Both strategies trade Bitcoin (BTC).</span>
             <label class="field">Initial investment
               <div class="input-prefix"><span>$</span>
                 <input type="number" id="f-amount" data-field="amount" min="${minC / 100}" max="${maxC / 100}" step="0.01" value="${num(t.amount)}">
@@ -530,14 +540,6 @@ function renderTrading() {
               <div class="stat"><div class="label">Worst day</div><div class="value">${st ? pct(st.worstDay) : '—'}</div></div>
               <div class="stat"><div class="label">Latest price</div><div class="value">${s && s.latestCents ? usd(s.latestCents) : '—'}</div></div>
             </div>
-
-            <strong class="small">Volatility vs. other cryptos</strong>
-            ${list.map(x => `
-              <div class="vol-row ${x.symbol === c.symbol ? 'active' : ''}">
-                <span>${esc(x.base)}</span>
-                <div class="vol-bar"><div style="width:${volOf(x) === null ? 0 : (volOf(x) / mv) * 100}%"></div></div>
-                <span>${volOf(x) === null ? '—' : pct(volOf(x))}</span>
-              </div>`).join('')}
 
             <strong class="small" style="display:block;margin-top:14px">Things to know</strong>
             <ul class="factors">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>
@@ -748,10 +750,10 @@ async function startTrading() {
     if (m) await api('/v1/bot', { method: 'POST', body: JSON.stringify({ model: m.id }) });
     const s = await api('/v1/session', {
       method: 'POST',
-      body: JSON.stringify({ depositCents: d.depositC, instrument: t.symbol, floorCents: d.floorC, ceilingCents: d.ceilingC }),
+      body: JSON.stringify({ depositCents: d.depositC, instrument: t.symbol, strategy: t.strategy, floorCents: d.floorC, ceilingCents: d.ceilingC }),
     });
     state.active = {
-      sessionId: s.sessionId, symbol: s.instrument, depositCents: s.depositCents,
+      sessionId: s.sessionId, symbol: s.instrument, strategy: s.strategy || t.strategy, depositCents: s.depositCents,
       floorCents: s.floorCents, ceilingCents: s.ceilingCents,
       startedAt: Date.now(), durationMs: d.durationMs,
     };
@@ -782,7 +784,7 @@ function openLiveModal() {
   const base = a.symbol.split('-')[0];
   openModal(`
     <div class="modal-head">
-      <div><h2 style="margin:0">Live trading · ${esc(base)}</h2><div class="muted small">Demo: trades are simulated</div></div>
+      <div><h2 style="margin:0">Live trading · ${esc(base)}</h2><div class="muted small">${esc(strategyOf(a.strategy).name)} strategy · Demo: trades are simulated</div></div>
       <span id="lv-status" class="pill">Connecting…</span>
     </div>
     <div class="live-stats">
@@ -1057,7 +1059,7 @@ function finalizeRun(s) {
   if (reason === 'manual' && live.stopWhy === 'time') reason = 'time';
   const userStopped = reason === 'manual' && live.stopping;
   recordRun({
-    sessionId: s.sessionId, symbol: s.instrument, depositCents: s.depositCents,
+    sessionId: s.sessionId, symbol: s.instrument, strategy: s.strategy || a.strategy, depositCents: s.depositCents,
     stakeCents: halt.stakeCents ?? s.stakeCents, pnlCents: halt.poolPnlCents ?? s.poolPnlCents,
     reason, startedAt: a.startedAt, endedAt: Date.now(),
   });
@@ -1072,7 +1074,7 @@ function lostSession() {
   if (!a) return;
   const s = live.session;
   recordRun({
-    sessionId: a.sessionId, symbol: a.symbol, depositCents: a.depositCents,
+    sessionId: a.sessionId, symbol: a.symbol, strategy: a.strategy, depositCents: a.depositCents,
     stakeCents: s ? s.stakeCents : a.depositCents, pnlCents: s ? s.poolPnlCents : 0,
     reason: 'lost', startedAt: a.startedAt, endedAt: Date.now(),
   });
@@ -1118,7 +1120,7 @@ const actions = {
   remove: id => { delete state.cart[id]; save(); route(); },
   'pay-full': () => completeOrder(cartTotalC()),
   activate: () => { location.hash = '#/trading'; },
-  'select-crypto': id => { state.trade.symbol = id; save(); renderTrading(); },
+  'select-strategy': id => { state.trade.strategy = strategyOf(id).id; save(); renderTrading(); },
   'set-pct': p => {
     const c = Math.min(Math.max(Math.round(cartTotalC() * Number(p) / 100), minInvestC()), maxInvestC());
     state.trade.amount = c / 100; save();

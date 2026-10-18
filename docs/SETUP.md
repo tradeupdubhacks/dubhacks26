@@ -70,3 +70,37 @@ On Windows, PyTorch also needs the Microsoft Visual C++ Redistributable (`https:
 - **Live trading**, after the page has created a session: `POST /v1/orders` and `ws://127.0.0.1:3000/v1/stream`. Each fill is an SPL token transfer on the local validator. The fill's `signature` is that transaction.
 
 `POST /v1/reset` returns `409` while a live session exists. Stop the session from the page first. The full request shapes are in [docs/model-api.md](docs/model-api.md).
+
+### Running both strategies
+
+The page lets the user pick a strategy for each Bitcoin session. The server tags the session with it, and each bot trades only its own:
+
+| Page option | `strategy` | Bot |
+| --- | --- | --- |
+| Fast, higher risk | `fast` | `BOT_STRATEGY=hft python -m model.live` (`model/hft.py`) |
+| Steady, lower risk | `safe` | `python -m model.live` (the trained model, `MODEL_POLICY=hybrid`) |
+
+Run both bots at the same time, next to the server:
+
+```bash
+FEE_MODEL=solana USE_CHAIN=1 npm start
+python -m model.live                     # trades safe sessions
+BOT_STRATEGY=hft python -m model.live    # trades fast sessions
+```
+
+Each bot ignores a session that belongs to the other strategy, so the two never trade the same session. Both were tuned with `FEE_MODEL=solana`.
+
+### Live Bitcoin prices
+
+By default (`BTC_FEED=live`), a live `BTC-USDT` session uses the live Binance USD-M BTCUSDT book: best bid and ask with sizes, plus trades, over the public websocket (`wss://fstream.binance.com`). This is the same feed the recorded tape and the bots' tuning data came from.
+
+- Fills still settle on the local Solana validator.
+- The server samples the feed every 200ms from startup and hands each new session the last two minutes as bar history.
+- Until two minutes have passed since startup, `Slower` waits for its window to fill.
+- If the feed goes quiet for 5 seconds, `priceSource` becomes `stale` and the bots stop sending orders.
+- `POST /v1/session` returns `503 feed_unavailable` before the first price arrives.
+- `POST /v1/step` is refused on a live-feed session (`409 step_not_for_live_feed`).
+
+`BTC_FEED=tape` replays the recorded 2026-10-01 tape for live sessions instead. Training (`POST /v1/reset`) always uses the tape.
+
+Binance's REST API refuses some regions. The websocket stream worked from the machine this was built on.
