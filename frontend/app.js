@@ -194,6 +194,7 @@ function loadState() {
   } catch { return d; }
 }
 let state = loadState();
+if (!state.active && !state.runs.length && !state.ended) { state = defaultState(); try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {} }
 const save = () => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {} };
 
 /* ============================================================
@@ -345,8 +346,10 @@ function renderHome() {
             <h3>${p.name}</h3>
             <div class="muted small">${p.desc}</div>
             <div class="price">${money(p.price)}</div>
-            <button class="btn" data-action="add" data-id="${p.id}">Add to cart</button>
-          </div>`).join('')}
+            ${state.cart[p.id] > 0
+              ? '<button class="btn added" disabled>Added to cart</button>'
+              : `<button class="btn" data-action="add" data-id="${p.id}">Add to cart</button>`}
+            </div>`).join('')}
       </div>
     </div>`;
 }
@@ -1073,8 +1076,7 @@ function closeLive() {
    EVENTS
    ============================================================ */
 const actions = {
-  add: id => { state.cart[id] = (state.cart[id] || 0) + 1; save(); updateCartCount(); },
-  inc: id => { state.cart[id]++; save(); route(); },
+  add: id => { state.cart[id] = (state.cart[id] || 0) + 1; save(); updateCartCount(); if (currentPath() === '/') renderHome(); },  inc: id => { state.cart[id]++; save(); route(); },
   dec: id => { state.cart[id] = Math.max(0, state.cart[id] - 1); save(); route(); },
   remove: id => { delete state.cart[id]; save(); route(); },
   'pay-full': () => completeOrder(cartTotalC()),

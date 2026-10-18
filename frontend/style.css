@@ -64,6 +64,9 @@ h1, h2, h3 { margin: 0 0 12px; }
 }
 .btn.discount:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.added, .btn.added:hover, .btn.added:disabled {
+  background: #9ca3af; color: #fff; opacity: 1; cursor: default;
+}
 .link-btn { background: none; border: 0; color: var(--bad); cursor: pointer; font-size: 13px; padding: 0; }
 
 .card {
