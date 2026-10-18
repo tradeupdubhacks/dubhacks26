@@ -13,9 +13,15 @@ const HISTORY_INTERVAL = '1d';
    DATA
    ============================================================ */
 const PRODUCTS = [
-  { id: 'p1', name: 'Wireless Headphones', price: 79.99, emoji: '🎧', desc: 'Noise-cancelling, 30h battery.' },
-  { id: 'p2', name: 'Smartwatch',          price: 149.00, emoji: '⌚', desc: 'Fitness tracking and notifications.' },
-  { id: 'p3', name: 'Travel Backpack',     price: 54.50,  emoji: '🎒', desc: '25L, water resistant.' },
+  { id: 'p1', name: 'Wireless Headphones', price: 79.99, img: 'img/p1.jpg', desc: 'Noise-cancelling, 30h battery.' },
+  { id: 'p2', name: 'Smartwatch',          price: 149.00, img: 'img/p2.jpg', desc: 'Fitness tracking and notifications.' },
+  { id: 'p3', name: 'Travel Backpack',     price: 54.50,  img: 'img/p3.jpg', desc: '25L, water resistant.' },
+  { id: 'p4', name: 'Mechanical Keyboard', price: 89.00,  img: 'img/p4.jpg', desc: 'Hot-swappable switches, RGB backlight.' },
+  { id: 'p5', name: 'Bluetooth Speaker',   price: 39.99,  img: 'img/p5.jpg', desc: 'Waterproof, 12h playtime.' },
+  { id: 'p6', name: 'Instant Camera',      price: 69.95,  img: 'img/p6.jpg', desc: 'Prints photos in seconds.' },
+  { id: 'p7', name: 'Running Shoes',       price: 99.00,  img: 'img/p7.jpg', desc: 'Lightweight with responsive cushioning.' },
+  { id: 'p8', name: 'Coffee Grinder',      price: 34.50,  img: 'img/p8.jpg', desc: 'Burr grinder, 15 grind settings.' },
+  { id: 'p9', name: 'Desk Lamp',           price: 29.99,  img: 'img/p9.jpg', desc: 'Dimmable LED with USB charging port.' },
 ];
 
 // Display info per coin. The server supplies symbol, base and data type; price history comes
@@ -385,7 +391,7 @@ function renderHome() {
       <div class="grid">
         ${PRODUCTS.map(p => `
           <div class="card product">
-            <div class="product-img">${p.emoji}</div>
+            <img class="product-img" src="${p.img}" alt="${esc(p.name)}">
             <h3>${p.name}</h3>
             <div class="muted small">${p.desc}</div>
             <div class="price">${money(p.price)}</div>
@@ -411,7 +417,7 @@ function renderCart() {
         <div class="card">
           ${items.map(i => `
             <div class="row">
-              <div class="thumb">${i.emoji}</div>
+              <img class="thumb" src="${i.img}" alt="">
               <div class="info"><strong>${i.name}</strong><br><span class="muted small">${money(i.price)} each</span><br>
                 <button class="link-btn" data-action="remove" data-id="${i.id}">Remove</button></div>
               <div class="qty">
@@ -441,7 +447,7 @@ function renderPayment() {
           <h3>Order summary</h3>
           ${items.map(i => `
             <div class="row">
-              <div class="thumb">${i.emoji}</div>
+              <img class="thumb" src="${i.img}" alt="">
               <div class="info"><strong>${i.name}</strong><br><span class="muted small">Qty ${i.qty}</span></div>
               <strong>${money(i.price * i.qty)}</strong>
             </div>`).join('')}
@@ -622,7 +628,7 @@ function renderCheckout() {
           <h3>Order summary</h3>
           ${items.map(i => `
             <div class="row">
-              <div class="thumb">${i.emoji}</div>
+              <img class="thumb" src="${i.img}" alt="">
               <div class="info"><strong>${i.name}</strong><br><span class="muted small">Qty ${i.qty}</span></div>
               <strong>${money(i.price * i.qty)}</strong>
             </div>`).join('')}
