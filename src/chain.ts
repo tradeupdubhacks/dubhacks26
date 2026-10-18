@@ -8,6 +8,7 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
 } from '@solana/web3.js'
@@ -208,19 +209,8 @@ export class LocalSolana implements Chain {
     fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'A',location:'chain.ts:fund',message:'before airdrop',data:{balance,slot,childExit:this.child?.exitCode ?? null},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
     if (balance >= LAMPORTS_PER_SOL) return
-    try {
-      const signature = await this.connection.requestAirdrop(owner.publicKey, 2 * LAMPORTS_PER_SOL)
-      await this.connection.confirmTransaction(signature, 'confirmed')
-      // #region agent log
-      fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'A',location:'chain.ts:fund',message:'airdrop confirmed',data:{lamports:2 * LAMPORTS_PER_SOL},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      // #region agent log
-      fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'B',location:'chain.ts:fund',message:'airdrop failed',data:{message,slot,lamports:2 * LAMPORTS_PER_SOL},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-      throw new ChainError(`airdrop to ${owner.publicKey.toBase58()} failed: ${message}`)
-    }
+    const signature = await this.connection.requestAirdrop(owner.publicKey, 2 * LAMPORTS_PER_SOL)
+    await this.connection.confirmTransaction(signature, 'confirmed')
   }
 
   private async ensureMints(): Promise<void> {
@@ -275,6 +265,11 @@ function loadKeypair(path: string): Keypair {
   const key = Keypair.generate()
   writeFileSync(path, JSON.stringify(Array.from(key.secretKey)))
   return key
+}
+
+function readFaucet(path: string): Keypair | null {
+  if (!existsSync(path)) return null
+  return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(path, 'utf8')) as number[]))
 }
 
 function readMints(path: string): MintFile | null {

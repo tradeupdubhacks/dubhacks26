@@ -64,6 +64,8 @@ A session is a deposit of `$1` to `$100` pooled with a `$1000` house fund, plus 
 
 Point the model at `http://127.0.0.1:3000`. There is no API key.
 
+On Windows, PyTorch also needs the Microsoft Visual C++ Redistributable (`https://aka.ms/vs/17/release/vc_redist.x64.exe`). Without it `import torch` fails with `WinError 126` and the model exits before it connects. Use `127.0.0.1`, not `localhost`: Windows tries `::1` first and adds about 2 seconds to every request.
+
 - **Training**, with no page session open: `POST /v1/reset`, then `POST /v1/step`. These do not send Solana transactions.
 - **Live trading**, after the page has created a session: `POST /v1/orders` and `ws://127.0.0.1:3000/v1/stream`. Each fill is an SPL token transfer on the local validator. The fill's `signature` is that transaction.
 

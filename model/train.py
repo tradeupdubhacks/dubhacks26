@@ -679,7 +679,10 @@ def evaluate() -> dict:
 
 
 def main() -> None:
-    evaluate()
+    rows, source = load_rows("http://localhost:3000")
+    if len(rows) <= HORIZON * 6:
+        raise SystemExit("Not enough rows to train.")
+    evaluate(rows, source)
 
 
 if __name__ == "__main__":

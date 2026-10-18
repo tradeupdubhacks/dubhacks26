@@ -8,7 +8,7 @@ from model.client import ModelClient
 
 def _up() -> bool:
     try:
-        urllib.request.urlopen("http://localhost:3000/v1/health", timeout=0.5)
+        urllib.request.urlopen("http://127.0.0.1:3000/v1/health", timeout=0.5)
         return True
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
