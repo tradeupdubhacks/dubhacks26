@@ -152,12 +152,17 @@ input[type=range] { width: 100%; margin-top: 8px; accent-color: var(--accent); }
 .dur input { margin-top: 0; }
 
 canvas#chart { width: 100%; height: 260px; display: block; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+.stat { background: #f7f8fb; border-radius: 10px; padding: 12px; }
+.stat .label { font-size: 12px; color: var(--muted); }
+.stat .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
 .vol-row { display: grid; grid-template-columns: 52px 1fr 52px; gap: 10px; align-items: center; font-size: 13px; margin: 6px 0; }
 .vol-bar { height: 8px; background: #eceef3; border-radius: 99px; overflow: hidden; }
 .vol-bar div { height: 100%; background: #b9b0ee; border-radius: 99px; }
 .vol-row.active .vol-bar div { background: var(--accent); }
 .vol-row.active { font-weight: 700; }
-
+ul.factors { margin: 8px 0 0; padding-left: 18px; font-size: 14px; }
+ul.factors li { margin-bottom: 4px; }
 
 .params { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
 .summary { background: #f7f8fb; border-radius: 10px; padding: 14px; font-size: 14px; margin-top: 6px; }
@@ -206,5 +211,6 @@ canvas#chart { width: 100%; height: 260px; display: block; }
 
 @media (max-width: 800px) {
   .two-col, .trade-layout, .params { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: 1fr 1fr; }
   .nav { padding: 14px 16px; }
 }
