@@ -2,7 +2,7 @@ import { OrderBook, type MatchFill, type RestingOrder } from './book.js'
 import { ChainError, type Chain, type SettlementLeg } from './chain.js'
 import { mulberry32, type Rng } from './rng.js'
 import { fetchSolBars, fetchSolMid } from './price.js'
-import { BtcTape, type TopOfBook } from './tape.js'
+import { BtcTape, type BtcSource, type LiveBtcSource, type TopOfBook } from './tape.js'
 import {
   BOOK_DEPTH,
   DEPOSIT_MAX,
@@ -17,7 +17,10 @@ import {
   MID_HISTORY,
   RATE_LIMIT,
   RATE_WINDOW_MS,
+  DEFAULT_INSTRUMENT,
+  DEFAULT_STRATEGY,
   SETTLEMENT_SIGNATURES,
+  STRATEGIES,
   SOLANA_LAMPORTS_PER_SIGNATURE,
   STAKE_HISTORY,
   TAKER_BPS,
@@ -37,6 +40,7 @@ import {
   type PriceSource,
   type SessionView,
   type Side,
+  type Strategy,
   type UserFill,
 } from './types.js'
 
@@ -138,6 +142,7 @@ export class Market {
 
   private session: {
     id: string
+    strategy: Strategy
     deposit: number
     floor: number
     ceiling: number
@@ -166,12 +171,26 @@ export class Market {
   /** SOL price used to turn lamports into cents. Refreshed at session open and from the SOL feed. */
   private solCents = 10_000
 
+  /** True when the current BTC-USDT session reads the live feed instead of the tape. */
+  private btcLive = false
+
   constructor(
     tapeDirectory: string,
     private readonly chain: Chain | null = null,
     readonly feeModel: FeeModel = 'exchange',
+    /** Live BTC-USDT book for live sessions. Training always replays the tape. */
+    private readonly btcFeed: LiveBtcSource | null = null,
   ) {
     this.tape = new BtcTape(tapeDirectory)
+  }
+
+  /** Live sessions read the live feed when one is attached. Everything else replays the tape. */
+  private get btc(): BtcSource {
+    return this.btcLive && this.btcFeed ? this.btcFeed : this.tape
+  }
+
+  get btcFeedAttached(): boolean {
+    return this.btcFeed !== null
   }
 
   /** Network fee of one settlement transaction, in fractional cents. */
@@ -296,6 +315,9 @@ export class Market {
       }
       if (this.mode === 'live' && this.instrument.symbol === 'SOL-USD') {
         return failure(409, 'step_not_for_live_mid', 'A live SOL-USD session advances on the wall clock.')
+      }
+      if (this.mode === 'live' && this.btcLive) {
+        return failure(409, 'step_not_for_live_feed', 'A live BTC-USDT session follows the live market on the wall clock.')
       }
       if (this.mode === 'idle') {
         return failure(409, 'session_required', 'Call reset before step, or open a BTC-USDT session.')
@@ -430,16 +452,21 @@ export class Market {
       if (this.mode === 'live' && !this.halted) {
         return failure(409, 'session_running', 'A session is already running. Stop it before starting another.')
       }
-      const extra = unknown(input, new Set(['depositCents', 'instrument', 'floorCents', 'ceilingCents']))
+      const extra = unknown(input, new Set(['depositCents', 'instrument', 'floorCents', 'ceilingCents', 'strategy']))
       if (extra) return extra
       const deposit = input.depositCents
       if (!isInt(deposit) || deposit < DEPOSIT_MIN || deposit > DEPOSIT_MAX) {
         return failure(400, 'deposit_out_of_range', 'Deposit must be an integer from 100 to 10000 cents.')
       }
-      if (typeof input.instrument !== 'string' || !instrumentOf(input.instrument)) {
+      const symbol = input.instrument === undefined ? DEFAULT_INSTRUMENT : input.instrument
+      if (typeof symbol !== 'string' || !instrumentOf(symbol)) {
         return failure(400, 'unknown_instrument', 'Instrument is not available.')
       }
-      const inst = instrumentOf(input.instrument)!
+      const inst = instrumentOf(symbol)!
+      const strategy = input.strategy === undefined ? DEFAULT_STRATEGY : input.strategy
+      if (typeof strategy !== 'string' || !STRATEGIES.includes(strategy as Strategy)) {
+        return failure(400, 'bad_strategy', `Strategy must be one of: ${STRATEGIES.join(', ')}.`)
+      }
       const floor = input.floorCents === undefined ? 0 : input.floorCents
       if (!isInt(floor) || floor < 0 || floor >= deposit) {
         return failure(400, 'floor_out_of_range', 'Floor must be an integer from 0 up to, but not including, the deposit.')
@@ -447,6 +474,9 @@ export class Market {
       if (input.ceilingCents === undefined) return failure(400, 'ceiling_required', 'Ceiling is required.')
       if (!isInt(input.ceilingCents) || input.ceilingCents <= deposit) {
         return failure(400, 'ceiling_not_above_deposit', 'Ceiling must be an integer strictly above the deposit.')
+      }
+      if (inst.symbol === 'BTC-USDT' && this.btcFeed && !this.btcFeed.available) {
+        return failure(503, 'feed_unavailable', 'Live Bitcoin prices are not available right now. Try again in a few seconds.')
       }
       if (this.chain) {
         try {
@@ -470,6 +500,7 @@ export class Market {
       }
       this.session = {
         id: `sess_${++this.sessionSeq}`,
+        strategy: strategy as Strategy,
         deposit,
         floor,
         ceiling: input.ceilingCents,
@@ -513,6 +544,7 @@ export class Market {
           }
         : null,
       instrument: this.instrument.symbol,
+      strategy: this.session.strategy,
       depositCents: this.session.deposit,
       floorCents: this.session.floor,
       ceilingCents: this.session.ceiling,
@@ -569,6 +601,7 @@ export class Market {
       stakeCents: live ? (this.frozenStake ?? this.stakeCents()) : null,
       floorCents: live ? this.session!.floor : null,
       ceilingCents: live ? this.session!.ceiling : null,
+      strategy: live ? this.session!.strategy : null,
       step: this.stepCount,
       done: this.mode === 'training' && this.stepCount >= this.episodeSteps,
     }
@@ -611,11 +644,12 @@ export class Market {
     this.feeCarry = 0
     this.referenceMid = null
     if (this.mode !== 'live') this.session = null
+    this.btcLive = input.mode === 'live' && input.instrument.symbol === 'BTC-USDT' && this.btcFeed !== null
     if (input.instrument.symbol === 'BTC-USDT') {
       this.data = 'tape'
-      this.source = 'tape'
-      if (!this.tape.available) throw new Error('BTC tape files are missing')
-      const top = await this.tape.open()
+      this.source = this.btcLive ? 'binance' : 'tape'
+      if (!this.btc.available) throw new Error(this.btcLive ? 'Live BTC prices are unavailable' : 'BTC tape files are missing')
+      const top = await this.btc.open()
       this.applyTop(top)
     } else if (input.mode === 'live') {
       this.data = 'reference'
@@ -662,8 +696,9 @@ export class Market {
 
   private async moveBook(marketMs: number): Promise<MarketEvent[]> {
     if (this.data === 'tape') {
-      const top = await this.tape.advance(marketMs)
+      const top = await this.btc.advance(marketMs)
       this.applyTop(top, marketMs)
+      if (this.btcLive && this.btcFeed) this.source = this.btcFeed.stale ? 'stale' : 'binance'
       return []
     }
     if (this.data === 'synthetic') return this.quoteSynthetic(marketMs - this.marketMs)
@@ -715,7 +750,16 @@ export class Market {
    * History is skipped, not faked, when it is unavailable.
    */
   private async preroll(): Promise<void> {
-    if (this.data === 'tape') {
+    if (this.data === 'tape' && this.btcLive && this.btcFeed) {
+      // The live feed has been sampling the book since the server started.
+      const history = this.btcFeed.history(BAR_HISTORY)
+      for (let i = 0; i < history.length; i += 1) {
+        this.marketMs = (i + 1) * BAR_MS
+        this.applyTop(history[i], this.marketMs)
+        this.recordBar()
+      }
+      this.applyTop(await this.btcFeed.open(), this.marketMs)
+    } else if (this.data === 'tape') {
       for (let i = 1; i <= BAR_HISTORY; i += 1) {
         this.marketMs = i * BAR_MS
         this.applyTop(await this.tape.advance(this.marketMs), this.marketMs)
@@ -1442,6 +1486,7 @@ function isStringArray(value: unknown): value is string[] {
 
 export function instrumentsBody(
   fees: ReturnType<Market['feeView']> = { model: 'exchange', makerBps: MAKER_BPS, takerBps: TAKER_BPS, solanaFeeCents: 0 },
+  btcLive = false,
 ) {
   return {
     houseFundCents: HOUSE_CENTS,
@@ -1453,9 +1498,13 @@ export function instrumentsBody(
       quote: item.quote,
       priceTickCents: item.priceTickCents,
       lotSize: item.lotSize,
-      data: item.data,
-      ...(item.tape ? { tape: item.tape } : {}),
-      ...(item.sources ? { sources: item.sources } : {}),
+      ...(item.symbol === 'BTC-USDT' && btcLive
+        ? { data: 'live', sources: ['binance'] }
+        : {
+            data: item.data,
+            ...(item.tape ? { tape: item.tape } : {}),
+            ...(item.sources ? { sources: item.sources } : {}),
+          }),
     })),
   }
 }

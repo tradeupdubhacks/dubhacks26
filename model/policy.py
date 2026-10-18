@@ -346,3 +346,94 @@ def decide(
         ],
         reason=reason,
     )
+
+
+# Hybrid policy (MODEL_POLICY=hybrid, the default in model/live.py).
+#
+# The network's 5-minute forecast decides whether to be long at all. The top-of-book
+# imbalance, (bid size - ask size) / (bid size + ask size), times the entry and exit.
+# Tuned with 20-minute simulations through the server on 26 windows of recorded
+# BTCUSDT (FEE_MODEL=solana, $100 deposit, $0 floor, $105 ceiling): +$5 in all 26,
+# median 2.3 minutes, deepest dip -$2.03. The same rule without the forecast also
+# reached +$5 in all 26, faster, with dips to -$5.89. The forecast mostly keeps the
+# bot out of the market when the book's lean is not backed by a longer move.
+HYBRID_LOTS = 200
+HYBRID_ENTER_IMBALANCE = 0.6
+HYBRID_EXIT_IMBALANCE = 0.6
+HYBRID_EXIT_BPS = 0.0
+HYBRID_MAX_LEVERAGE = 200.0
+
+
+@dataclass
+class HybridConfig:
+    lots: int = HYBRID_LOTS
+    enter_imbalance: float = HYBRID_ENTER_IMBALANCE
+    exit_imbalance: float = HYBRID_EXIT_IMBALANCE
+    exit_bps: float = HYBRID_EXIT_BPS
+    max_leverage: float = HYBRID_MAX_LEVERAGE
+
+
+def book_imbalance(observation: dict) -> float:
+    bids = observation.get("bids") or []
+    asks = observation.get("asks") or []
+    if not bids or not asks:
+        return 0.0
+    bid_size, ask_size = int(bids[0]["size"]), int(asks[0]["size"])
+    total = bid_size + ask_size
+    return (bid_size - ask_size) / total if total > 0 else 0.0
+
+
+def decide_hybrid(
+    observation: dict,
+    limits: InstrumentLimits,
+    expected_bps: float,
+    enter_bps: float,
+    ids: IdSource,
+    config: HybridConfig | None = None,
+) -> Decision:
+    """Long `lots` when the forecast clears `enter_bps` and the book leans up; flat on a weak forecast or a hard lean down."""
+    config = config or HybridConfig()
+    if observation.get("halted"):
+        return Decision(reason="halted")
+    stake = observation.get("stakeCents")
+    if stake is None:
+        return Decision(reason="no_session")
+    if observation.get("priceSource") == "stale":
+        return Decision(cancel_all=True, reason="stale")
+    book = _best(observation)
+    if book is None:
+        return Decision(reason="empty_book")
+    if _open_orders(observation):
+        return Decision(reason="working")
+    bid, ask = book
+    position = int(observation.get("positionLots") or 0)
+    imbalance = book_imbalance(observation)
+    tick = limits.price_tick_cents
+
+    if position == 0:
+        if expected_bps < enter_bps or imbalance < config.enter_imbalance:
+            return Decision(reason="wait")
+        lot_cents = ask / 1000
+        cap = int(int(stake) * config.max_leverage // lot_cents) if lot_cents > 0 else config.lots
+        size = max(1, min(config.lots, cap, limits.max_order_lots))
+        while size > 0 and not position_allows(observation, "buy", size, limits):
+            size -= 1
+        if size < 1:
+            return Decision(reason="position_limit")
+        price = aggressive_price("buy", bid, ask, tick)
+        return Decision(
+            orders=[{"clientOrderId": ids.next_id(), "side": "buy", "size": size, "type": "ioc", "price": price}],
+            reason="enter",
+        )
+
+    if position > 0 and expected_bps >= config.exit_bps and imbalance > -config.exit_imbalance:
+        return Decision(reason="hold")
+    # Exit a long on a weak forecast or a hard lean down. A short (left by another
+    # policy) is simply closed, since this policy only holds longs.
+    side = "sell" if position > 0 else "buy"
+    size = min(abs(position), limits.max_order_lots)
+    price = aggressive_price(side, bid, ask, tick)
+    return Decision(
+        orders=[{"clientOrderId": ids.next_id(), "side": side, "size": size, "type": "ioc", "price": price}],
+        reason="exit",
+    )

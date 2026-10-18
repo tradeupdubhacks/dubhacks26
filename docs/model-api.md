@@ -196,6 +196,7 @@ The book and the pool account. Returned by `GET /v1/account`, `POST /v1/reset`, 
 | `stakeCents` | integer \| `null` | User stake when a live session exists. `null` in training. |
 | `floorCents` | integer \| `null` | |
 | `ceilingCents` | integer \| `null` | |
+| `strategy` | `"fast"` \| `"safe"` \| `null` | The live session's strategy. `null` outside a live session. A bot should trade only the sessions of its own strategy. |
 | `step` | integer | Steps since reset. `0` in a live session that has not been stepped. |
 | `done` | boolean | Training episode finished. Always `false` in a live session. |
 

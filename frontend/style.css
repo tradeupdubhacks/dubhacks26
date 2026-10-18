@@ -114,6 +114,8 @@ h1, h2, h3 { margin: 0 0 12px; }
 }
 .crypto-item:hover { border-color: var(--accent); }
 .crypto-item.active { border-color: var(--accent); background: #f3f0ff; box-shadow: 0 0 0 2px rgba(108,76,241,.15); }
+.strategy-item { flex-direction: column; align-items: flex-start; gap: 4px; line-height: 1.4; }
+.strategy-head { display: flex; align-items: center; gap: 8px; }
 .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
 .tag.low { background: #dcfce7; color: var(--good); }
 .tag.medium { background: #fef3c7; color: var(--warn); }

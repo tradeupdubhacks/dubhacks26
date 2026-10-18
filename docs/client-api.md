@@ -129,6 +129,7 @@ Returned by `POST /v1/session`, `POST /v1/stop`, `GET /v1/session`, and every wa
 | `status` | `"running"` \| `"halted"` | |
 | `halt` | Halt \| null | |
 | `instrument` | string | Symbol from `GET /v1/instruments`. |
+| `strategy` | `"fast"` \| `"safe"` | Which bot trades the session. `fast` is the rule-based high-frequency bot. `safe` is the trained model. |
 | `depositCents` | integer | What the user put in. |
 | `floorCents` | integer | |
 | `ceilingCents` | integer | |
@@ -302,7 +303,8 @@ Create the one live session. This is the only way a stake starts. The model cann
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `depositCents` | integer | yes | Dummy deposit, `100`–`10000`. |
-| `instrument` | string | yes | A `symbol` from `GET /v1/instruments`. |
+| `instrument` | string | no | A `symbol` from `GET /v1/instruments`. Default `"BTC-USDT"`. |
+| `strategy` | string | no | `"fast"` or `"safe"`. Default `"safe"`. Any other value is `400 bad_strategy`. |
 | `floorCents` | integer | no | Default `0`. Must satisfy `0 <= floorCents < depositCents`. |
 | `ceilingCents` | integer | yes | Must be an integer strictly greater than `depositCents`. |
 

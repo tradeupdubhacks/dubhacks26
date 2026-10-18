@@ -115,6 +115,16 @@ export interface TradePrint {
   ts: number
 }
 
+/**
+ * Which bot trades a live session. `fast` is the rule-based high-frequency bot
+ * (model/hft.py): quicker, bigger swings. `safe` is the trained model (model/live.py):
+ * trades only when its forecast and the order book agree.
+ */
+export type Strategy = 'fast' | 'safe'
+export const STRATEGIES: readonly Strategy[] = ['fast', 'safe']
+export const DEFAULT_STRATEGY: Strategy = 'safe'
+export const DEFAULT_INSTRUMENT: InstrumentSymbol = 'BTC-USDT'
+
 export interface Observation {
   market: string
   clock: 'step' | 'wall'
@@ -136,6 +146,8 @@ export interface Observation {
   stakeCents: number | null
   floorCents: number | null
   ceilingCents: number | null
+  /** The live session's strategy, so each bot trades only its own sessions. Null outside a live session. */
+  strategy: Strategy | null
   step: number
   done: boolean
 }
@@ -178,6 +190,7 @@ export interface SessionView {
   status: 'running' | 'halted'
   halt: HaltView | null
   instrument: InstrumentSymbol
+  strategy: Strategy
   depositCents: number
   floorCents: number
   ceilingCents: number
