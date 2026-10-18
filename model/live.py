@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -12,17 +13,20 @@ import websockets
 
 from model.client import ModelClient
 from model.features import features_from_observation
+from model.features_session import session_features
 from model.net import SignalNet
 from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
+from model.session_policy import SessionParams, SessionState, decide_session
 
 ARTIFACTS = Path(__file__).resolve().parent / "artifacts" / "signal.pt"
+SESSION_ARTIFACT = Path(__file__).resolve().parent / "artifacts" / "session_signal.pt"
 
 
 def load_scorer(path: Path = ARTIFACTS):
     if not path.exists():
         raise SystemExit(f"Missing {path}. Run python -m model.train first.")
     blob = torch.load(path, map_location="cpu", weights_only=False)
-    network = SignalNet()
+    network = SignalNet(int(blob.get("n_features", 4)))
     network.load_state_dict(blob["state_dict"])
     network.eval()
     mean = blob["mean"]
@@ -36,6 +40,15 @@ def load_scorer(path: Path = ARTIFACTS):
             return float(torch.sigmoid(network(tensor)).item())
 
     return score, threshold
+
+
+def load_session_model(path: Path = SESSION_ARTIFACT):
+    """Scorer and policy parameters for the goal-seeking session policy (python -m model.train_session)."""
+    if not path.exists():
+        raise SystemExit(f"Missing {path}. Run python -m model.train_session first.")
+    score, _threshold = load_scorer(path)
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    return score, SessionParams(**blob["session_params"])
 
 
 # Documented in docs/model-api.md. The client instrument payload does not repeat them.
@@ -137,14 +150,19 @@ async def _send(socket, decision: Decision, sent_at: list[float], inflight: InFl
         await socket.send(json.dumps(message))
 
 
-async def session(base_url: str) -> None:
+async def session(base_url: str, policy: str = "quote") -> None:
     client = ModelClient(base_url)
     client.health()
     catalog = {
         item["symbol"]: item
         for item in client.instruments()["instruments"]
     }
-    score_of, threshold = load_scorer()
+    if policy == "session":
+        score_of, params = load_session_model()
+        threshold = params.threshold
+        states: dict[str, SessionState] = {}
+    else:
+        score_of, threshold = load_scorer()
     # The server remembers every id, including ones from an earlier connection.
     ids = IdSource(prefix=f"bot{int(time.time() * 1000):x}")
     inflight = InFlight()
@@ -192,9 +210,18 @@ async def session(base_url: str) -> None:
             if limits is None:
                 continue
             view = inflight.view(observation, now)
-            features = features_from_observation(view)
-            score = score_of(features) if features is not None else 0.5
-            decision = decide(view, limits, score, threshold, ids, features)
+            if policy == "session":
+                if symbol != "BTC-USDT":
+                    continue                      # the session model is trained on the BTC replay only
+                features = session_features(view)
+                score = score_of(features) if features is not None else 0.5
+                decision = decide_session(
+                    view, limits, score, features, params, states.setdefault(symbol, SessionState()), ids
+                )
+            else:
+                features = features_from_observation(view)
+                score = score_of(features) if features is not None else 0.5
+                decision = decide(view, limits, score, threshold, ids, features)
             if decision.reason == "halted":
                 if not halted:
                     print("session halted, not sending orders")
@@ -212,10 +239,10 @@ async def session(base_url: str) -> None:
                 await _send(socket, decision, sent_at, inflight, view)
 
 
-async def run(base_url: str = "http://127.0.0.1:3000") -> None:
+async def run(base_url: str = "http://127.0.0.1:3000", policy: str = "quote") -> None:
     while True:
         try:
-            await session(base_url)
+            await session(base_url, policy)
         except SystemExit:
             raise
         except Exception as error:
@@ -224,7 +251,9 @@ async def run(base_url: str = "http://127.0.0.1:3000") -> None:
 
 
 def main() -> None:
-    asyncio.run(run())
+    """python -m model.live            join-the-touch quoting (signal.pt)
+    python -m model.live session    goal-seeking session policy (session_signal.pt), BTC-USDT only"""
+    asyncio.run(run(policy="session" if "session" in sys.argv[1:] else "quote"))
 
 
 if __name__ == "__main__":

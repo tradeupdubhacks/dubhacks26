@@ -1,0 +1,783 @@
+{
+  "calibration": "10-14 h (scores from the fold trained on 0-10 h)",
+  "test": "14-24 h, out of sample",
+  "deposit_cents": 10000,
+  "configs": {
+    "goal+1%/floor-2%": {
+      "calibration_best_ev": {
+        "ev_pct": 0.9599999999999997,
+        "p_ceiling": 1.0,
+        "params": {
+          "take_profit_bps": 25,
+          "stop_bps": 25.0,
+          "max_hold_steps": 3000,
+          "cooldown_steps": 25,
+          "threshold": 0.7427337765693665,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "calibration_best_p_ceiling": {
+        "ev_pct": 0.9599999999999997,
+        "p_ceiling": 1.0,
+        "params": {
+          "take_profit_bps": 25,
+          "stop_bps": 25.0,
+          "max_hold_steps": 3000,
+          "cooldown_steps": 25,
+          "threshold": 0.7427337765693665,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "test": {
+        "ev_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.07407407407407407,
+            "p_ceiling_ci": [
+              0.0,
+              0.23529411764705882
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9259259259259259,
+            "mean_stake_change_pct": 0.004000000000000002,
+            "mean_stake_change_ci": [
+              -0.1242105263157895,
+              0.1431111111111111
+            ],
+            "mean_trades": 0.21481481481481482
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": -0.591962962962963,
+            "mean_stake_change_ci": [
+              -1.0630966374269006,
+              -0.13725490196078435
+            ],
+            "mean_trades": 0.5148148148148148
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.07407407407407407,
+            "p_ceiling_ci": [
+              0.0,
+              0.23529411764705882
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9259259259259259,
+            "mean_stake_change_pct": 0.004000000000000002,
+            "mean_stake_change_ci": [
+              -0.1242105263157895,
+              0.1431111111111111
+            ],
+            "mean_trades": 0.21481481481481482
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.1111111111111111,
+            "p_ceiling_ci": [
+              0.0,
+              0.35294117647058826
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.8888888888888888,
+            "mean_stake_change_pct": 0.09255555555555556,
+            "mean_stake_change_ci": [
+              -0.06493233082706766,
+              0.3532222222222222
+            ],
+            "mean_trades": 0.2037037037037037
+          }
+        },
+        "p_ceiling_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.07407407407407407,
+            "p_ceiling_ci": [
+              0.0,
+              0.23529411764705882
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9259259259259259,
+            "mean_stake_change_pct": 0.004000000000000002,
+            "mean_stake_change_ci": [
+              -0.1242105263157895,
+              0.1431111111111111
+            ],
+            "mean_trades": 0.21481481481481482
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": -0.591962962962963,
+            "mean_stake_change_ci": [
+              -1.0630966374269006,
+              -0.13725490196078435
+            ],
+            "mean_trades": 0.5148148148148148
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.07407407407407407,
+            "p_ceiling_ci": [
+              0.0,
+              0.23529411764705882
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9259259259259259,
+            "mean_stake_change_pct": 0.004000000000000002,
+            "mean_stake_change_ci": [
+              -0.1242105263157895,
+              0.1431111111111111
+            ],
+            "mean_trades": 0.21481481481481482
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.1111111111111111,
+            "p_ceiling_ci": [
+              0.0,
+              0.35294117647058826
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.8888888888888888,
+            "mean_stake_change_pct": 0.09255555555555556,
+            "mean_stake_change_ci": [
+              -0.06493233082706766,
+              0.3532222222222222
+            ],
+            "mean_trades": 0.2037037037037037
+          }
+        }
+      }
+    },
+    "goal+1%/floor-1%": {
+      "calibration_best_ev": {
+        "ev_pct": 0.5499999999999999,
+        "p_ceiling": 0.0,
+        "params": {
+          "take_profit_bps": 40,
+          "stop_bps": 20.0,
+          "max_hold_steps": 9000,
+          "cooldown_steps": 25,
+          "threshold": 0.7427337765693665,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "calibration_best_p_ceiling": {
+        "ev_pct": -0.396,
+        "p_ceiling": 0.2571428571428571,
+        "params": {
+          "take_profit_bps": 15,
+          "stop_bps": 15.0,
+          "max_hold_steps": 9000,
+          "cooldown_steps": 25,
+          "threshold": 0.7427337765693665,
+          "vol_gate": 0.0,
+          "entry_slip_ticks": 2
+        }
+      },
+      "test": {
+        "ev_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": -0.0017777777777777794,
+            "mean_stake_change_ci": [
+              -0.08,
+              0.0791111111111111
+            ],
+            "mean_trades": 0.2222222222222222
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.0,
+            "p_ceiling_ci": [
+              0.0,
+              0.0
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 1.0,
+            "mean_stake_change_pct": -0.2954444444444445,
+            "mean_stake_change_ci": [
+              -0.5354298245614036,
+              -0.0664705882352943
+            ],
+            "mean_trades": 0.44814814814814813
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": -0.0017777777777777794,
+            "mean_stake_change_ci": [
+              -0.08,
+              0.0791111111111111
+            ],
+            "mean_trades": 0.2222222222222222
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.07407407407407407,
+            "p_ceiling_ci": [
+              0.0,
+              0.23529411764705882
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9259259259259259,
+            "mean_stake_change_pct": 0.055888888888888905,
+            "mean_stake_change_ci": [
+              -0.04965413533834586,
+              0.22544444444444448
+            ],
+            "mean_trades": 0.2222222222222222
+          }
+        },
+        "p_ceiling_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.04814814814814815,
+            "p_ceiling_ci": [
+              0.0,
+              0.09261111111111109
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9518518518518518,
+            "mean_stake_change_pct": -0.531074074074074,
+            "mean_stake_change_ci": [
+              -0.6939883986928105,
+              -0.33563981481481486
+            ],
+            "mean_trades": 1.4592592592592593
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.011111111111111112,
+            "p_ceiling_ci": [
+              0.0,
+              0.03333333333333333
+            ],
+            "p_floor": 0.018518518518518517,
+            "p_floor_ci": [
+              0.0,
+              0.04817251461988302
+            ],
+            "p_timeout": 0.9703703703703704,
+            "mean_stake_change_pct": -0.4719629629629629,
+            "mean_stake_change_ci": [
+              -0.6822219298245614,
+              -0.21629388888888895
+            ],
+            "mean_trades": 1.0444444444444445
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.04814814814814815,
+            "p_ceiling_ci": [
+              0.0,
+              0.09261111111111109
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9518518518518518,
+            "mean_stake_change_pct": -0.531074074074074,
+            "mean_stake_change_ci": [
+              -0.6939883986928105,
+              -0.33563981481481486
+            ],
+            "mean_trades": 1.4592592592592593
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.2851851851851852,
+            "p_ceiling_ci": [
+              0.008862745098039217,
+              0.543874269005848
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.7148148148148148,
+            "mean_stake_change_pct": 0.05862962962962957,
+            "mean_stake_change_ci": [
+              -0.31112205882352945,
+              0.4490296428571427
+            ],
+            "mean_trades": 2.6555555555555554
+          }
+        }
+      }
+    },
+    "goal+5%/floor-5%": {
+      "calibration_best_ev": {
+        "ev_pct": 1.8199999999999998,
+        "p_ceiling": 0.0,
+        "params": {
+          "take_profit_bps": 40,
+          "stop_bps": 20.0,
+          "max_hold_steps": 9000,
+          "cooldown_steps": 25,
+          "threshold": 0.7427337765693665,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "calibration_best_p_ceiling": {
+        "ev_pct": 0.29152380952380946,
+        "p_ceiling": 0.21904761904761905,
+        "params": {
+          "take_profit_bps": 25,
+          "stop_bps": 12.5,
+          "max_hold_steps": 9000,
+          "cooldown_steps": 25,
+          "threshold": 1.1920928955078125e-06,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "test": {
+        "ev_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": 0.00518518518518515,
+            "mean_stake_change_ci": [
+              -0.2715789473684211,
+              0.30222222222222217
+            ],
+            "mean_trades": 0.2962962962962963
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.0,
+            "p_ceiling_ci": [
+              0.0,
+              0.0
+            ],
+            "p_floor": 0.037037037037037035,
+            "p_floor_ci": [
+              0.0,
+              0.1111111111111111
+            ],
+            "p_timeout": 0.962962962962963,
+            "mean_stake_change_pct": -1.461555555555555,
+            "mean_stake_change_ci": [
+              -2.7006488562091504,
+              -0.2260000000000006
+            ],
+            "mean_trades": 0.7037037037037037
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": 0.00518518518518515,
+            "mean_stake_change_ci": [
+              -0.2715789473684211,
+              0.30222222222222217
+            ],
+            "mean_trades": 0.2962962962962963
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.044444444444444446,
+            "p_ceiling_ci": [
+              0.0,
+              0.1411764705882353
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9555555555555556,
+            "mean_stake_change_pct": 0.21485185185185188,
+            "mean_stake_change_ci": [
+              -0.16615037593984958,
+              0.8378888888888889
+            ],
+            "mean_trades": 0.2777777777777778
+          }
+        },
+        "p_ceiling_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.00392156862745098,
+              0.04814814814814815
+            ],
+            "p_floor": 0.040740740740740744,
+            "p_floor_ci": [
+              0.0,
+              0.0941331269349845
+            ],
+            "p_timeout": 0.9333333333333333,
+            "mean_stake_change_pct": -3.758962962962962,
+            "mean_stake_change_ci": [
+              -4.313842982456141,
+              -3.0914676900584794
+            ],
+            "mean_trades": 5.677777777777778
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.011111111111111112,
+            "p_ceiling_ci": [
+              0.0,
+              0.033382352941176426
+            ],
+            "p_floor": 0.011111111111111112,
+            "p_floor_ci": [
+              0.0,
+              0.025925925925925925
+            ],
+            "p_timeout": 0.9777777777777779,
+            "mean_stake_change_pct": -3.4468148148148146,
+            "mean_stake_change_ci": [
+              -4.11854205366357,
+              -2.7037041666666672
+            ],
+            "mean_trades": 5.5814814814814815
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.044444444444444446,
+            "p_ceiling_ci": [
+              0.0,
+              0.0927777777777776
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9555555555555556,
+            "mean_stake_change_pct": -3.3065555555555557,
+            "mean_stake_change_ci": [
+              -4.2239466666666665,
+              -2.308538725490197
+            ],
+            "mean_trades": 6.011111111111111
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.11481481481481481,
+            "p_ceiling_ci": [
+              0.025925925925925925,
+              0.20008333333333328
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.8851851851851852,
+            "mean_stake_change_pct": -0.34648148148148145,
+            "mean_stake_change_ci": [
+              -1.1845504385964911,
+              0.3984449999999998
+            ],
+            "mean_trades": 8.992592592592592
+          }
+        }
+      }
+    },
+    "goal+5%/floor-10%": {
+      "calibration_best_ev": {
+        "ev_pct": 1.8199999999999998,
+        "p_ceiling": 0.0,
+        "params": {
+          "take_profit_bps": 40,
+          "stop_bps": 20.0,
+          "max_hold_steps": 9000,
+          "cooldown_steps": 25,
+          "threshold": 0.7427337765693665,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "calibration_best_p_ceiling": {
+        "ev_pct": 0.507238095238095,
+        "p_ceiling": 0.22857142857142856,
+        "params": {
+          "take_profit_bps": 25,
+          "stop_bps": 12.5,
+          "max_hold_steps": 9000,
+          "cooldown_steps": 25,
+          "threshold": 1.1920928955078125e-06,
+          "vol_gate": 0.2818266749382019,
+          "entry_slip_ticks": 2
+        }
+      },
+      "test": {
+        "ev_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": 0.010370370370370353,
+            "mean_stake_change_ci": [
+              -0.2715789473684211,
+              0.31777777777777777
+            ],
+            "mean_trades": 0.2962962962962963
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.0,
+            "p_ceiling_ci": [
+              0.0,
+              0.0
+            ],
+            "p_floor": 0.06666666666666667,
+            "p_floor_ci": [
+              0.0,
+              0.21176470588235294
+            ],
+            "p_timeout": 0.9333333333333333,
+            "mean_stake_change_pct": -2.214555555555555,
+            "mean_stake_change_ci": [
+              -4.55559656862745,
+              -0.2260000000000006
+            ],
+            "mean_trades": 0.937037037037037
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.0,
+              0.08235294117647059
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": 0.010370370370370353,
+            "mean_stake_change_ci": [
+              -0.2715789473684211,
+              0.31777777777777777
+            ],
+            "mean_trades": 0.2962962962962963
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.044444444444444446,
+            "p_ceiling_ci": [
+              0.0,
+              0.1411764705882353
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9555555555555556,
+            "mean_stake_change_pct": 0.21485185185185188,
+            "mean_stake_change_ci": [
+              -0.16615037593984958,
+              0.8378888888888889
+            ],
+            "mean_trades": 0.2777777777777778
+          }
+        },
+        "p_ceiling_max": {
+          "model": {
+            "sessions": 270,
+            "p_ceiling": 0.025925925925925925,
+            "p_ceiling_ci": [
+              0.00392156862745098,
+              0.04814814814814815
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.9740740740740741,
+            "mean_stake_change_pct": -6.31774074074074,
+            "mean_stake_change_ci": [
+              -7.95465350877193,
+              -4.326253703703705
+            ],
+            "mean_trades": 8.237037037037037
+          },
+          "random_dir": {
+            "sessions": 270,
+            "p_ceiling": 0.011111111111111112,
+            "p_ceiling_ci": [
+              0.0,
+              0.033382352941176426
+            ],
+            "p_floor": 0.003703703703703704,
+            "p_floor_ci": [
+              0.0,
+              0.011764705882352941
+            ],
+            "p_timeout": 0.9851851851851853,
+            "mean_stake_change_pct": -5.595444444444444,
+            "mean_stake_change_ci": [
+              -7.457680555555554,
+              -3.4598522875817004
+            ],
+            "mean_trades": 7.433333333333334
+          },
+          "always_long": {
+            "sessions": 270,
+            "p_ceiling": 0.044444444444444446,
+            "p_ceiling_ci": [
+              0.0,
+              0.0927777777777776
+            ],
+            "p_floor": 0.003703703703703704,
+            "p_floor_ci": [
+              0.0,
+              0.011764705882352941
+            ],
+            "p_timeout": 0.951851851851852,
+            "mean_stake_change_pct": -4.814777777777777,
+            "mean_stake_change_ci": [
+              -6.956542763157894,
+              -2.7536509259259265
+            ],
+            "mean_trades": 9.6
+          },
+          "model_zero_fees_diagnostic": {
+            "sessions": 270,
+            "p_ceiling": 0.11481481481481481,
+            "p_ceiling_ci": [
+              0.025925925925925925,
+              0.20008333333333328
+            ],
+            "p_floor": 0.0,
+            "p_floor_ci": [
+              0.0,
+              0.0
+            ],
+            "p_timeout": 0.8851851851851852,
+            "mean_stake_change_pct": -0.686074074074074,
+            "mean_stake_change_ci": [
+              -2.2054796783625727,
+              0.41509629629629585
+            ],
+            "mean_trades": 10.174074074074074
+          }
+        }
+      }
+    }
+  }
+}

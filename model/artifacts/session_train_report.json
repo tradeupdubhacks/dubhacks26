@@ -1,0 +1,43 @@
+{
+  "horizon_ticks": 25,
+  "tick_ms": 200,
+  "feature_names": [
+    "imbalance_top",
+    "micro_dev_bps",
+    "spread_bps",
+    "ret_1_bps",
+    "ret_5_bps",
+    "ret_15_bps",
+    "ret_31_bps",
+    "vol_bps",
+    "log_top_size",
+    "trade_signed_log_size",
+    "trade_vs_mid_bps"
+  ],
+  "folds": [
+    {
+      "fold": 0,
+      "train_ticks": 105595,
+      "test_ic_pearson": 0.18010247771617643,
+      "test_dir_acc": 0.6057753938535236,
+      "test_dir_acc_top10pct_conf": 0.7289593523359758,
+      "mean_abs_5s_move_bps": 1.7212385281740217
+    },
+    {
+      "fold": 1,
+      "train_ticks": 154996,
+      "test_ic_pearson": 0.23663289908906424,
+      "test_dir_acc": 0.6383138609078385,
+      "test_dir_acc_top10pct_conf": 0.789087656529517,
+      "mean_abs_5s_move_bps": 1.3707137983634525
+    },
+    {
+      "fold": 2,
+      "train_ticks": 218472,
+      "test_ic_pearson": 0.4306288728339752,
+      "test_dir_acc": 0.7823433242506812,
+      "test_dir_acc_top10pct_conf": 0.9400871459694989,
+      "mean_abs_5s_move_bps": 0.9035576788434935
+    }
+  ]
+}

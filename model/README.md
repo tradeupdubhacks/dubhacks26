@@ -19,3 +19,9 @@ The page owns the time limit and calls `POST /v1/stop`. The bot reads the floor 
 A `BTC-USDT` lot is `0.001` BTC, about `$83` of notional. The bot flattens instead of quoting when one lot would cross the floor or ceiling, so a `BTC-USDT` session needs room for a full lot on both sides, for example deposit `$100`, floor `$0`, ceiling `$200`. A `$50` deposit with a `$25` floor never quotes.
 
 The live loop tracks its own in-flight places and cancels from the `events` replies, decides at most every `100ms`, and uses a new `clientOrderId` prefix on every connection, because the server remembers every id it has seen. With no session open it pings every `5s` and prints `waiting for a live session` instead of reconnecting.
+
+## Session policy
+
+`python -m model.live session` runs a goal-seeking policy for a live user session (reach the ceiling, protect the floor)
+instead of join-the-touch quoting. Inputs, outputs, sizing, results and limits are in [SESSION_MODEL.md](SESSION_MODEL.md).
+Train with `python -m model.tape_grid && python -m model.train_session && python -m model.evaluate_session`.

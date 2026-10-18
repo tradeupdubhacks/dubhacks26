@@ -4,3 +4,10 @@ dist
 *.log
 !chain/fresh-ledger/rocksdb/*.log
 .local-solana
+.venv/
+# downloaded or regenerated market data (python hft/download_extra.py, hft/research/*.py, python -m model.tape_grid)
+hft/data/ext/
+hft/data/out/*grid50ms.npz
+hft/data/out/session_*.npy
+hft/research/klines_*.npz
+hft/research/bars_1s.csv.gz

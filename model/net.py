@@ -7,10 +7,10 @@ from torch import nn
 
 
 class SignalNet(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, n_features: int = 4) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(4, 32),
+            nn.Linear(n_features, 32),
             nn.ReLU(),
             nn.Linear(32, 16),
             nn.ReLU(),
