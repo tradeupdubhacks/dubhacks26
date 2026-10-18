@@ -26,7 +26,7 @@ describe('gateway', () => {
     assert.equal(health.statusCode, 200)
     assert.equal(health.json().execution, 'fake')
     const instruments = await app.inject({ method: 'GET', url: '/v1/instruments' })
-    assert.equal(instruments.json().houseFundCents, 100_000)
+    assert.equal(instruments.json().houseFundCents, 10_000_000)
     assert.ok(instruments.json().instruments.some((item: { symbol: string }) => item.symbol === 'SOL-USD'))
     const session = await app.inject({ method: 'GET', url: '/v1/session' })
     assert.deepEqual(session.json(), { status: 'idle' })
@@ -361,7 +361,7 @@ describe('order lifecycle', () => {
       payload: {
         dtMs: 100,
         orders: [
-          { clientOrderId: 'big', side: 'buy', size: 10, type: 'limit', price: 10 },
+          { clientOrderId: 'big', side: 'buy', size: 100_000, type: 'limit', price: 10 },
           { clientOrderId: 'over', side: 'buy', size: 1, type: 'limit', price: 10 },
         ],
       },
@@ -551,5 +551,56 @@ describe('solana settlement', () => {
     assert.equal(settled[0]![0]!.lots, 2)
     assert.ok(settled[0]![0]!.quoteCents > 0)
     await built.close()
+  })
+})
+
+describe('fee model', () => {
+  it('reports Phoenix-style basis points by default', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      const fees = (await built.app.inject({ method: 'GET', url: '/v1/instruments' })).json().fees
+      assert.deepEqual(fees, { model: 'exchange', makerBps: 2, takerBps: 5, solanaFeeCents: 0 })
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('charges only the Solana network fee, carrying fractions of a cent', async () => {
+    const built = await buildApp({ clock: false, feeModel: 'solana' })
+    try {
+      const { app } = built
+      const fees = (await app.inject({ method: 'GET', url: '/v1/instruments' })).json().fees
+      assert.equal(fees.model, 'solana')
+      assert.equal(fees.makerBps, 0)
+      assert.equal(fees.takerBps, 0)
+      // Two 5,000-lamport signatures at the default $100 SOL reference: 0.1 cents per fill.
+      assert.ok(Math.abs(fees.solanaFeeCents - 0.1) < 1e-9)
+
+      await app.inject({ method: 'POST', url: '/v1/reset', payload: { instrument: 'SOL-USD', seed: 6 } })
+      const charged: number[] = []
+      let paid = 0
+      for (let i = 0; i < 25; i += 1) {
+        const book = (await app.inject({ method: 'GET', url: '/v1/book' })).json()
+        const ask = book.asks[0].price
+        const step = await app.inject({
+          method: 'POST',
+          url: '/v1/step',
+          payload: { dtMs: 100, orders: [{ clientOrderId: `sf${i}`, side: 'buy', size: 1, type: 'ioc', price: ask + 20 }] },
+        })
+        for (const event of step.json().events as Array<{ type: string; clientOrderId: string; fee: number; price: number; size: number }>) {
+          if (event.type === 'fill' && event.clientOrderId === `sf${i}`) {
+            charged.push(event.fee)
+            paid += Math.round((event.price * event.size) / 1_000)
+          }
+        }
+      }
+      assert.equal(charged.length, 25)
+      assert.ok(charged.every((fee) => fee === 0 || fee === 1))
+      assert.equal(charged.reduce((sum: number, fee) => sum + fee, 0), 2)
+      const account = (await app.inject({ method: 'GET', url: '/v1/account' })).json()
+      assert.equal(account.freeCashCents, 10_000_000 - paid - 2)
+    } finally {
+      await built.close()
+    }
   })
 })

@@ -13,6 +13,8 @@ export interface BotModel {
   label: string
   description: string
   args: string[]
+  /** Extra environment for this model's process (merged over BotOptions.env). */
+  env?: Record<string, string>
   /** Instruments it can trade. Other sessions run without a bot. */
   instruments: string[]
 }
@@ -113,7 +115,7 @@ export class BotRunner implements BotControl {
     const log = this.options.log ?? (() => {})
     const child = spawn(this.options.command, model.args, {
       cwd: this.options.cwd,
-      env: { ...process.env, ...this.options.env, MODEL_API_URL: this.options.url, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, ...this.options.env, ...model.env, MODEL_API_URL: this.options.url, PYTHONUNBUFFERED: '1' },
       stdio: ['ignore', 'inherit', 'inherit'],
     })
     this.child = child
@@ -179,11 +181,20 @@ export const BOT_MODELS: BotModel[] = [
     instruments: ['BTC-USDT'],
   },
   {
-    id: 'quoter',
-    label: 'Market-making quoter',
-    description: 'Posts one-lot bid and ask quotes at the touch. Bitcoin and Solana; its trades are tiny.',
+    id: 'network',
+    label: 'Team network (forecasts returns)',
+    description: "The team's network predicts the forward return and sends taker orders when it clears an entry level (BOT_STRATEGY=model). Bitcoin only.",
     args: ['-m', 'model.live'],
-    instruments: ['BTC-USDT', 'SOL-USD'],
+    env: { BOT_STRATEGY: 'model' },
+    instruments: ['BTC-USDT'],
+  },
+  {
+    id: 'hft',
+    label: 'HFT order-book rule',
+    description: "The team's rule bot: enters when the book leans one way, exits when it stops or after 5 seconds (BOT_STRATEGY=hft). Bitcoin only.",
+    args: ['-m', 'model.live'],
+    env: { BOT_STRATEGY: 'hft' },
+    instruments: ['BTC-USDT'],
   },
   {
     id: 'none',

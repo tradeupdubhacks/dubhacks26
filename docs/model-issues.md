@@ -76,6 +76,7 @@ Stake is `deposit + pool PnL`, so the whole pool must earn `$5`. A session stops
 | Bot rail guard bypassed | Held-out | `$1000` / `$5` / `$0` / `$10` | **Lost the `$5` in 13.3 min.** 325 fills, never above `$0`, halted on the floor at `-$5.25`. |
 | Full window, wide rails | Held-out, 7.6 h | `$1000` / `$100` / `$0` / none | **`-$98.10`.** Never above `$0`. 6,416 fills, all maker, 0 taker. Fees `$64.16`. |
 | Back-to-back `$5` episodes cut from that run | Held-out, 7.6 h | `$5` each | **0 of 19 reached `+$5`. 19 lost the `$5`.** Median time to lose it 14.9 min (4.6 to 63.6). Largest rise from any low point: `$0.64`. |
+| Live data | Binance `BTCUSDT`, 2026-10-17, 1 h | `$1000` / `$100` / `$0` / none | **`-$2.58`.** Never above `$0`. 248 fills, all maker. Fees `$2.48`. |
 | Training-day control | First 2 h of 2026-10-01 (trained on) | `$1000` / `$100` / `$0` / none | **`-$15.24`.** Never above `$0`. 1,390 fills, fees `$13.90`. |
 | Stock bot, `$10,000` | Held-out, 7.6 h | `$10,000` / `$10,000` / `$0` / `+$5` | **0 orders.** See issue 6. |
 | Stock bot, `$10,000`, wide ceiling | Held-out, 7.6 h | `$10,000` / `$10,000` / `$0` / none | **`-$98.10`**, the same to the cent as the `$1000` run. Never reached `+$5`. |
@@ -84,7 +85,7 @@ Stake is `deposit + pool PnL`, so the whole pool must earn `$5`. A session stops
 
 The episode cut takes the next episode's start from where the last one ended in a single continuous run. The position is not flattened at each boundary. Positions are at most 10 lots and are marked to market, so the PnL is consistent, but the cut is close to back-to-back sessions, not exact.
 
-A replay of one hour of live Binance futures data, recorded on 2026-10-17, is still to be run.
+**Live data.** One hour of Binance USD-M `BTCUSDT` quotes and trades was recorded on 2026-10-17 from 16:44 to 17:44 (645,798 quote updates, 61,813 trades, no gaps). It was written in the replay format and run through the same harness with wide rails. Result: **`-$2.58`, never above `$0`**. 248 fills, all maker, 0 taker. Fees `$2.48`, so `-$0.10` before fees. The calmer hour filled the bot about a third as often as the held-out day (248 per hour against about 840), so it lost more slowly. It still did not reach `+$5`. At `-$2.58` an hour, a `$5` stake would reach its floor in about 2 hours.
 
 ### 6. A `$5` stake, or a `$5` target, blocks every BTC order
 

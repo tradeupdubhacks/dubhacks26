@@ -12,7 +12,7 @@ All JSON bodies use `Content-Type: application/json`. There is no authentication
 
 | Field | Meaning |
 | --- | --- |
-| `*Cents` | Dummy USD cents. `500` is `$5.00`. The house fund is `100000` (`$1000`). |
+| `*Cents` | Dummy USD cents. `500` is `$5.00`. The house fund is `10000000` (`$100,000`). |
 | `price` / `midCents` | Integer USD cents for **one** whole base coin. `$104.00` SOL is `10400`. A `$60,000.00` BTC is `6000000`. |
 | `size` / `positionLots` | Integer lots. One lot is `0.001` of the base coin. `10` lots is `0.01` BTC or SOL. |
 | Timestamps | ISO-8601 UTC strings, millisecond precision. |
@@ -27,7 +27,7 @@ round(priceCents * lots / 1000)
 
 ## Session rules
 
-The house fund is `$1000`. The user adds a deposit. The model trades the pooled cash. The page shows the user's stake, not the house fund.
+The house fund is `$100,000`. The user adds a deposit. The model trades the pooled cash. The page shows the user's stake, not the house fund.
 
 ```text
 stakeCents = depositCents + poolPnlCents
@@ -134,7 +134,7 @@ Returned by `POST /v1/session`, `POST /v1/stop`, `GET /v1/session`, and every wa
 | `ceilingCents` | integer | |
 | `stakeCents` | integer | The number the page plots. |
 | `poolPnlCents` | integer | `stakeCents - depositCents`. |
-| `houseFundCents` | integer | Always `100000` in this build. |
+| `houseFundCents` | integer | Always `10000000` in this build. |
 | `poolEquityCents` | integer | Cash plus marked position for the whole pool. |
 | `positionLots` | integer | Signed. Positive is long the base coin. |
 | `freeCashCents` | integer | Dummy cash not reserved by the open position's cost. |
@@ -224,9 +224,9 @@ The instrument picker and the legal ranges for the session form.
 
 ```json
 {
-  "houseFundCents": 100000,
+  "houseFundCents": 10000000,
   "deposit": { "minCents": 100, "maxCents": 10000 },
-  "fees": { "makerBps": 0, "takerBps": 0 },
+  "fees": { "model": "solana", "makerBps": 0, "takerBps": 0, "solanaFeeCents": 0.1 },
   "instruments": [
     {
       "symbol": "BTC-USDT",
@@ -254,7 +254,9 @@ The instrument picker and the legal ranges for the session form.
 | --- | --- | --- |
 | `houseFundCents` | integer | Dummy fund the deposit is pooled with. |
 | `deposit.minCents` / `deposit.maxCents` | integer | Inclusive deposit bounds. |
-| `fees.makerBps` / `fees.takerBps` | integer | Fee rates, in basis points, applied to fake fills. |
+| `fees.model` | `"solana"` \| `"exchange"` | Which fee model the server runs (`FEE_MODEL`). |
+| `fees.makerBps` / `fees.takerBps` | integer | Exchange fee rates in basis points; both `0` under `solana`. |
+| `fees.solanaFeeCents` | number | Network fee per fill in cents under `solana` (about `0.1`); `0` under `exchange`. |
 | `instruments[].symbol` | string | Value sent as `instrument`. |
 | `instruments[].base` | string | Coin the position is in. |
 | `instruments[].quote` | string | Always `USD` for the stake. |
@@ -269,7 +271,7 @@ The instrument picker and the legal ranges for the session form.
 - Build the currency dropdown from `instruments`. Do not offer a symbol that is absent.
 - Prefill the deposit field inside `deposit.minCents` and `deposit.maxCents`.
 - Label `BTC-USDT` as recorded data and `SOL-USD` as a live mid with fake fills.
-- Show the `$1000` fund next to the deposit so the pooling is visible before start.
+- Show the `$100,000` fund next to the deposit so the pooling is visible before start.
 
 ### `GET /v1/session`
 

@@ -5,90 +5,26 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import time
-from pathlib import Path
 
-import torch
 import websockets
 
-from model.client import ModelClient
-from model.features import features_from_observation
-from model.features_session import session_features
-from model.net import SignalNet
-from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
-from model.session_policy import SessionParams, SessionState, decide_session
-from model.sizing import MAKER_BPS, TAKER_BPS
-from model.transformer_signal import TickStream, TransformerScorer
-
-ARTIFACTS = Path(__file__).resolve().parent / "artifacts" / "signal.pt"
-SESSION_ARTIFACT = Path(__file__).resolve().parent / "artifacts" / "session_signal.pt"
-
-
-def load_scorer(path: Path = ARTIFACTS):
-    if not path.exists():
-        raise SystemExit(f"Missing {path}. Run python -m model.train first.")
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    network = SignalNet(int(blob.get("n_features", 4)))
-    network.load_state_dict(blob["state_dict"])
-    network.eval()
-    mean = blob["mean"]
-    std = blob["std"]
-    threshold = float(blob["threshold"])
-
-    def score(features: list[float]) -> float:
-        scaled = [(value - center) / scale for value, center, scale in zip(features, mean, std)]
-        tensor = torch.tensor(scaled, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            return float(torch.sigmoid(network(tensor)).item())
-
-    return score, threshold
-
-
-# "idle" uses the parameters saved in the artifact, which were calibrated to trade only when confidence is
-# extreme; on the held-out day that is almost never (confidence peaks near 0.73, the threshold is 0.74), so the
-# stake stays flat. "active" trades whenever confidence is above 0.30. On the held-out hours it makes about 18
-# trades per session and loses money on average (fees and a tiny edge); see model/SESSION_MODEL.md.
-PROFILES = {
-    "idle": None,
-    "active": dict(take_profit_bps=25, stop_bps=25, max_hold_steps=3000, cooldown_steps=25, threshold=0.30, vol_gate=0.0),
-}
-
-
-def load_session_model(path: Path = SESSION_ARTIFACT, profile: str | None = None):
-    """Scorer and policy parameters for the goal-seeking session policy (python -m model.train_session).
-
-    The profile comes from MODEL_PROFILE (default "active"): "idle" keeps the artifact's own parameters."""
-    if not path.exists():
-        raise SystemExit(f"Missing {path}. Run python -m model.train_session first.")
-    profile = profile or os.environ.get("MODEL_PROFILE", "active")
-    if profile not in PROFILES:
-        raise SystemExit(f"Unknown MODEL_PROFILE {profile!r}. Use one of: {', '.join(PROFILES)}.")
-    score, _threshold = load_scorer(path)
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    params = SessionParams(**(PROFILES[profile] or blob["session_params"]))
-    print(f"session model profile: {profile} (entry threshold {params.threshold:.2f}, take-profit/stop {params.take_profit_bps:g}/{params.stop_bps:g} bps)")
-    return score, params
-
-
-def load_transformer_model():
-    """The tick transformer and its short-hold policy: enter on a confident 5 s forecast, flatten after about 5 s.
-
-    Entry confidence is |prediction| / scale, so the threshold is the one that selected the top 10 % of ticks on the validation day.
-    There is no take-profit; the trade ends at the hold limit (25 ticks = 5 s) or a 25 bps stop. Sizing aims for the largest position the
-    rails allow, so `sizing_bps` is just above the fees."""
-    scorer = TransformerScorer()
-    params = SessionParams(
-        take_profit_bps=0, stop_bps=25, max_hold_steps=25, cooldown_steps=5, threshold=scorer.entry_threshold,
-        vol_gate=0.0, sizing_bps=TAKER_BPS + MAKER_BPS + 1.0,
-    )
-    print(f"transformer loaded (entry confidence {params.threshold:.2f}, hold {params.max_hold_steps * 0.2:.0f}s, stop {params.stop_bps:g} bps)")
-    return scorer, params
+from model.client import ApiError, ModelClient
+from model.policy import (
+    HARD_EXIT_BPS,
+    TRADE_EVERY_MS,
+    Decision,
+    IdSource,
+    InstrumentLimits,
+    decide,
+    within_rate_limit,
+)
+from model.score import Scorer
 
 
 # Documented in docs/model-api.md. The client instrument payload does not repeat them.
 DOCUMENTED_LIMITS = {
-    "BTC-USDT": (10, 10),
+    "BTC-USDT": (100_000, 100_000),
     "SOL-USD": (2000, 10000),
 }
 
@@ -185,24 +121,14 @@ async def _send(socket, decision: Decision, sent_at: list[float], inflight: InFl
         await socket.send(json.dumps(message))
 
 
-async def session(base_url: str, policy: str = "quote") -> None:
+async def session(base_url: str) -> None:
     client = ModelClient(base_url)
     client.health()
     catalog = {
         item["symbol"]: item
         for item in client.instruments()["instruments"]
     }
-    if policy == "session":
-        score_of, params = load_session_model()
-        threshold = params.threshold
-        states: dict[str, SessionState] = {}
-    elif policy == "transformer":
-        scorer, params = load_transformer_model()
-        stream = TickStream()
-        threshold = params.threshold
-        states = {}
-    else:
-        score_of, threshold = load_scorer()
+    scorer = Scorer()
     # The server remembers every id, including ones from an earlier connection.
     ids = IdSource(prefix=f"bot{int(time.time() * 1000):x}")
     inflight = InFlight()
@@ -211,7 +137,17 @@ async def session(base_url: str, policy: str = "quote") -> None:
     last_decision = 0.0
     waiting = False
     halted = False
-    print(f"connected to {client.ws_url()}, policy threshold {threshold:.2f}")
+    announced = False
+    ready_announced = False
+    entry_ts: int | None = None
+    last_trade_ts: int | None = None
+    last_trade_wall: float | None = None
+    seen_position: int | None = None
+    last_sign = 0
+    print(
+        f"connected to {client.ws_url()}, enter {scorer.enter_bps:.1f} bps "
+        f"over {scorer.horizon_bars * scorer.bar_ms / 1000:.0f}s"
+    )
     async with websockets.connect(client.ws_url(), max_queue=None) as socket:
         while True:
             try:
@@ -234,13 +170,29 @@ async def session(base_url: str, policy: str = "quote") -> None:
             if observation is None:
                 continue
             if observation.get("stakeCents") is None and not observation.get("halted"):
+                scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
+                announced = False
+                ready_announced = False
                 if not waiting:
                     print("waiting for a live session. Open one from the page.")
                     waiting = True
                 continue
             if waiting:
-                print("live session found, quoting")
+                print("live session found")
                 waiting = False
+                scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
+                announced = False
+                ready_announced = False
             now = loop.time()
             if now - last_decision < DECISION_INTERVAL:
                 continue
@@ -250,22 +202,68 @@ async def session(base_url: str, policy: str = "quote") -> None:
             if limits is None:
                 continue
             view = inflight.view(observation, now)
-            if policy in ("session", "transformer"):
-                if symbol != "BTC-USDT":
-                    continue                      # both are trained on BTC top of book only
-                features = session_features(view)
-                if policy == "transformer":
-                    stream.update(observation)    # the raw snapshot, not the in-flight view: only the book matters
-                    score = scorer.score(stream)
-                else:
-                    score = score_of(features) if features is not None else 0.5
-                decision = decide_session(
-                    view, limits, score, features, params, states.setdefault(symbol, SessionState()), ids
+            if scorer.bucket is not None and int(observation.get("ts") or 0) // scorer.bar_ms < scorer.bucket:
+                # The clock went back: a new session replaced the old one. Load its history too.
+                scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
+                announced = False
+                ready_announced = False
+            if scorer.bucket is None:
+                # Start from the server's bar history instead of waiting two minutes to build one.
+                try:
+                    history = client.bars()
+                    if history.get("market") == symbol:
+                        loaded = scorer.seed(history.get("bars") or [])
+                        print(f"loaded {loaded} bars of price history from the server")
+                except ApiError as error:
+                    print(f"no bar history ({error.code}), building the window live")
+            expected = scorer.update(observation)
+            if not scorer.ready and not announced:
+                print("price history is still filling. buys still go out on the 5s pace")
+                announced = True
+            elif scorer.ready and not ready_announced:
+                print(
+                    f"price window ready. adding while the forecast stays above "
+                    f"{-HARD_EXIT_BPS:.0f} bps, then holding"
                 )
-            else:
-                features = features_from_observation(view)
-                score = score_of(features) if features is not None else 0.5
-                decision = decide(view, limits, score, threshold, ids, features)
+                ready_announced = True
+            position = int(observation.get("positionLots") or 0)
+            sign = (position > 0) - (position < 0)
+            ts = int(observation.get("ts") or 0)
+            if sign == 0:
+                entry_ts = None
+            elif entry_ts is None or sign != last_sign:
+                entry_ts = ts
+            last_sign = sign
+            held = 0 if entry_ts is None else max(0, (ts - entry_ts) // scorer.bar_ms)
+            # Each fill starts the 5s clock. The next decision adds another clip
+            # until the rail cap, and then the long is held. A canceled IOC does
+            # not move the position, so it does not reset the clock.
+            if seen_position is None:
+                seen_position = position
+            elif position != seen_position:
+                last_trade_ts = ts
+                last_trade_wall = now
+                seen_position = position
+            market_idle = TRADE_EVERY_MS if last_trade_ts is None else max(0, ts - last_trade_ts)
+            wall_idle = TRADE_EVERY_MS if last_trade_wall is None else max(0.0, (now - last_trade_wall) * 1000)
+            idle_ms = int(max(market_idle, wall_idle))
+            horizon = max(1, TRADE_EVERY_MS // max(1, scorer.bar_ms))
+            decision = decide(
+                view,
+                limits,
+                expected,
+                scorer.enter_bps,
+                scorer.exit_bps,
+                horizon,
+                held,
+                ids,
+                idle_ms,
+            )
             if decision.reason == "halted":
                 if not halted:
                     print("session halted, not sending orders")
@@ -279,14 +277,31 @@ async def session(base_url: str, policy: str = "quote") -> None:
                 # Nothing to flatten. Near a rail on a flat book, or a stale feed with no orders.
                 continue
             if decision.orders or decision.cancels or decision.cancel_all or decision.flatten:
-                print(decision.reason, len(decision.orders), "orders")
+                print(f"{decision.reason} expected {expected:.1f} bps, {len(decision.orders)} orders")
                 await _send(socket, decision, sent_at, inflight, view)
 
 
-async def run(base_url: str = "http://127.0.0.1:3000", policy: str = "quote") -> None:
+STRATEGIES = ("model", "hft")
+
+
+def strategy() -> str:
+    """Feature flag. BOT_STRATEGY=model (default) runs the network, BOT_STRATEGY=hft runs model/hft.py."""
+    name = os.environ.get("BOT_STRATEGY", "model").strip().lower() or "model"
+    if name not in STRATEGIES:
+        raise SystemExit(f"Unknown BOT_STRATEGY {name!r}. Use one of: {', '.join(STRATEGIES)}.")
+    return name
+
+
+async def run(base_url: str = "http://127.0.0.1:3000") -> None:
+    name = strategy()
+    if name == "hft":
+        from model.hft import session as run_session
+    else:
+        run_session = session
+    print(f"strategy: {name}")
     while True:
         try:
-            await session(base_url, policy)
+            await run_session(base_url)
         except SystemExit:
             raise
         except Exception as error:
@@ -295,12 +310,15 @@ async def run(base_url: str = "http://127.0.0.1:3000", policy: str = "quote") ->
 
 
 def main() -> None:
-    """python -m model.live            join-the-touch quoting (signal.pt)
-    python -m model.live session    goal-seeking session policy (session_signal.pt), BTC-USDT only
-    python -m model.live transformer short-hold transformer policy (transformer_signal.pt), BTC-USDT only"""
-    url = os.environ.get("MODEL_API_URL", "http://127.0.0.1:3000")
-    kind = "transformer" if "transformer" in sys.argv[1:] else "session" if "session" in sys.argv[1:] else "quote"
-    asyncio.run(run(url, policy=kind))
+    import sys
+
+    # `python -m model.live session` and `transformer` run the session models in model/live_session.py
+    if any(arg in sys.argv[1:] for arg in ("session", "transformer")):
+        from model.live_session import main as session_main
+
+        session_main()
+        return
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

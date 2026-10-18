@@ -47,6 +47,15 @@ describe('model bot process', () => {
     assert.ok(logs.some((m) => m.includes('exited (0)')), logs.join('|'))
   })
 
+  it("gives each model its own environment (how BOT_STRATEGY picks the team's bots)", async () => {
+    const probe = ['-e', "process.exit(process.env.BOT_STRATEGY === 'hft' && process.env.SHARED === '1' ? 0 : 9)"]
+    const hft = { ...model('hft', probe), env: { BOT_STRATEGY: 'hft' } }
+    const { bot, logs } = runner([hft], { env: { SHARED: '1' } })
+    bot.sync({ status: 'running', instrument: 'BTC-USDT' })
+    await until(() => logs.some((m) => m.includes('exited')))
+    assert.ok(logs.some((m) => m.includes('exited (0)')), logs.join('|'))
+  })
+
   it('gives up on a bot that keeps crashing until the next session', async () => {
     const { bot, logs } = runner([model('a', crasher)], { retryDelayMs: 0 })
     for (let i = 0; i < 6; i += 1) {

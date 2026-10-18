@@ -11,9 +11,11 @@ import math
 import os
 from dataclasses import dataclass
 
-# Fee rates in bps. They must match the server (src/types.ts); the server passes its own MAKER_BPS / TAKER_BPS to the bot.
-TAKER_BPS = float(os.environ.get("TAKER_BPS", "0"))
-MAKER_BPS = float(os.environ.get("MAKER_BPS", "0"))
+# Exchange fee rates in bps, as the server charges them: only under FEE_MODEL=exchange (the server passes its FEE_MODEL to the bot).
+# Under FEE_MODEL=solana (the default) there is no exchange fee; each fill pays about 0.1 cent of network fee, which sizing ignores.
+_EXCHANGE = os.environ.get("FEE_MODEL", "solana").strip().lower() == "exchange"
+TAKER_BPS = 5.0 if _EXCHANGE else 0.0
+MAKER_BPS = 2.0 if _EXCHANGE else 0.0
 SLIPPAGE_BPS = 0.5      # entry and stop crossing allowance beyond the quoted touch
 
 

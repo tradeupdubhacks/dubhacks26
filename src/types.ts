@@ -1,14 +1,9 @@
-export const HOUSE_CENTS = 100_000
+export const HOUSE_CENTS = 10_000_000
 export const DEPOSIT_MIN = 100
 export const DEPOSIT_MAX = 10_000
-// Trading fees, in basis points of each fill's notional. OFF (0) by default. Binance's regular-user futures rates are
-// MAKER_BPS=2 TAKER_BPS=5; set those environment variables to bring them back. The bot is started with the same values.
-function feeBps(name: string): number {
-  const value = Number(process.env[name] ?? 0)
-  return Number.isFinite(value) && value >= 0 ? value : 0
-}
-export const MAKER_BPS = feeBps('MAKER_BPS')
-export const TAKER_BPS = feeBps('TAKER_BPS')
+// Exchange (market) fee rates in basis points. They are charged only when FEE_MODEL=exchange (see FeeModel below).
+export const MAKER_BPS = 2
+export const TAKER_BPS = 5
 export const LATENCY_MS = 50
 export const RATE_LIMIT = 20
 export const RATE_WINDOW_MS = 1_000
@@ -45,8 +40,8 @@ export const INSTRUMENTS: readonly Instrument[] = [
     quote: 'USD',
     priceTickCents: 10,
     lotSize: '0.001',
-    maxOrderLots: 10,
-    maxPositionLots: 10,
+    maxOrderLots: 100_000,
+    maxPositionLots: 100_000,
     data: 'replay',
     tape: 'BTCUSDT_20261001',
   },
@@ -74,6 +69,17 @@ export function notionalCents(priceCents: number, lots: number): number {
 export function feeCents(notional: number, bps: number): number {
   return Math.floor((notional * bps) / 10_000)
 }
+
+/**
+ * How fills are charged. `exchange` is the Phoenix-style maker/taker fee in basis points.
+ * `solana` charges no exchange fee, only the network fee of the fill's settlement
+ * transaction: two signatures (pool and counterparty) at the 5,000-lamport base fee.
+ */
+export type FeeModel = 'exchange' | 'solana'
+export const FEE_MODELS: readonly FeeModel[] = ['exchange', 'solana']
+export const SOLANA_LAMPORTS_PER_SIGNATURE = 5_000
+export const SETTLEMENT_SIGNATURES = 2
+export const LAMPORTS_PER_SOL = 1_000_000_000
 
 export interface BookLevel {
   price: number

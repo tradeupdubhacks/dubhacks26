@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("websockets")
 pytest.importorskip("torch")
 
-import model.live as live
+import model.live_session as live
 from model.session_policy import SessionParams
 from model.transformer_signal import ARTIFACT, HISTORY, TICK_MS, WIN, TickStream, TransformerScorer, grid_features
 from tests.test_live_session import FakeClient, FakeConnect, FakeSocket

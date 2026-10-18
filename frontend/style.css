@@ -64,6 +64,9 @@ h1, h2, h3 { margin: 0 0 12px; }
 }
 .btn.discount:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.added, .btn.added:hover, .btn.added:disabled {
+  background: #9ca3af; color: #fff; opacity: 1; cursor: default;
+}
 .link-btn { background: none; border: 0; color: var(--bad); cursor: pointer; font-size: 13px; padding: 0; }
 
 .card {
@@ -192,10 +195,17 @@ ul.factors li { margin-bottom: 4px; }
 .pill.bad { background: #fee2e2; color: var(--bad); }
 .live-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
 .live-stats .value { font-size: 30px; }
-.live-graph-placeholder {
-  height: 160px; border: 2px dashed var(--border); border-radius: 10px;
-  display: grid; place-items: center; color: var(--muted); font-size: 14px; margin: 14px 0 8px;
-}
+.live-market { margin: 0 0 14px; }
+.live-market .value { font-size: 16px; }
+.live-chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 14px 0 6px; font-size: 14px; }
+.live-chart { display: block; width: 100%; height: 150px; border: 1px solid var(--border); border-radius: 10px; }
+.legend { display: inline-flex; align-items: center; gap: 6px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.dot.buy { background: var(--good); }
+.dot.sell { background: var(--bad); margin-left: 8px; }
+.live-fills { font-size: 13px; margin-bottom: 14px; }
+.fill-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.fill-row .side { min-width: 52px; }
 
 @media (max-width: 800px) {
   .two-col, .trade-layout, .params { grid-template-columns: 1fr; }

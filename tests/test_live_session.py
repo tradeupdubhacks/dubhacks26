@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("websockets")
 
-import model.live as live
+import model.live_session as live
 from model.session_policy import SessionParams
 
 
@@ -92,11 +92,6 @@ def test_open_position_gets_a_take_profit_then_a_stop(monkeypatch):
 def test_halted_and_foreign_markets_send_nothing(monkeypatch):
     sent = run_script(monkeypatch, [snapshot(halted=True, haltReason="ceiling"), snapshot(market="SOL-USD")])
     assert sent == []
-
-
-def test_the_old_quoting_scorer_still_loads_with_four_features():
-    score, threshold = live.load_scorer()
-    assert 0.0 <= score([0.1, 0.0, 1e-4, 0.0]) <= 1.0
 
 
 def test_session_profiles_idle_uses_the_artifact_and_active_trades_more(monkeypatch):

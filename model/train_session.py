@@ -20,7 +20,7 @@ from torch import nn
 
 from model.backtest import SUB, Tape, run_session, training_features
 from model.features_session import FEATURE_NAMES_SESSION, VOL_INDEX
-from model.net import SignalNet
+from model.net import SmallNet
 from model.session_policy import SessionParams
 
 ARTIFACTS = Path(__file__).resolve().parent / "artifacts"
@@ -39,9 +39,9 @@ def device() -> torch.device:
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def fit(x: np.ndarray, y: np.ndarray, dev: torch.device, epochs: int = 6, seed: int = 0) -> SignalNet:
+def fit(x: np.ndarray, y: np.ndarray, dev: torch.device, epochs: int = 6, seed: int = 0) -> SmallNet:
     torch.manual_seed(seed)
-    net = SignalNet(x.shape[1]).to(dev)
+    net = SmallNet(x.shape[1]).to(dev)
     xt, yt = torch.tensor(x, device=dev), torch.tensor(y, device=dev)
     opt, loss_fn = torch.optim.Adam(net.parameters(), lr=1e-3), nn.BCEWithLogitsLoss()
     for epoch in range(epochs):
@@ -54,7 +54,7 @@ def fit(x: np.ndarray, y: np.ndarray, dev: torch.device, epochs: int = 6, seed: 
     return net.eval()
 
 
-def score(net: SignalNet, x: np.ndarray, dev: torch.device) -> np.ndarray:
+def score(net: SmallNet, x: np.ndarray, dev: torch.device) -> np.ndarray:
     with torch.no_grad():
         return torch.sigmoid(net(torch.tensor(x, device=dev))).cpu().numpy()
 

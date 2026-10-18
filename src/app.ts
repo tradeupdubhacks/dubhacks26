@@ -19,6 +19,7 @@ interface Socket {
 import { loadHistory } from './history.js'
 import { fetchSolMid } from './price.js'
 import { schemas } from './schema.js'
+import type { FeeModel } from './types.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -36,8 +37,13 @@ export async function buildApp(options?: {
   historyFetch?: typeof fetch
   /** Starts and stops the model process as sessions open and end (see bot.ts). */
   bot?: BotControl | null
+  feeModel?: FeeModel
 }): Promise<App> {
-  const market = new Market(options?.tapeDir ?? join(root, 'hft', 'data', 'raw'), options?.chain ?? null)
+  const market = new Market(
+    options?.tapeDir ?? join(root, 'hft', 'data', 'raw'),
+    options?.chain ?? null,
+    options?.feeModel ?? 'exchange',
+  )
   const app = Fastify({ logger: options?.logger ?? false })
   const watchers = new Set<Socket>()
   const streams = new Set<Socket>()
@@ -168,7 +174,7 @@ export async function buildApp(options?: {
     execution: options?.chain ? 'solana' : 'fake',
     ...(options?.chain ? { chain: options.chain.snapshot() } : {}),
   }))
-  app.get('/v1/instruments', async () => instrumentsBody())
+  app.get('/v1/instruments', async () => instrumentsBody(market.feeView()))
   app.get('/v1/history', async (request, reply) => {
     const query = isRecord(request.query) ? request.query : {}
     const result = await loadHistory(
@@ -182,6 +188,15 @@ export async function buildApp(options?: {
     return reply.code(result.status).send(result.body)
   })
   app.get('/v1/schema', async () => schemas)
+  app.get('/v1/bars', async (request, reply) => {
+    const query = isRecord(request.query) ? request.query : {}
+    const raw = stringQuery(query.limit)
+    const limit = raw === undefined || raw === '' ? 601 : Number(raw)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 601) {
+      return reply.code(400).send({ error: { code: 'bad_limit', message: 'limit must be an integer from 1 to 601.' } })
+    }
+    return market.barsView(limit)
+  })
   app.get('/v1/book', async () => {
     const view = market.observation()
     return {

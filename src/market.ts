@@ -1,6 +1,7 @@
 import { OrderBook, type MatchFill, type RestingOrder } from './book.js'
 import { ChainError, type Chain, type SettlementLeg } from './chain.js'
 import { mulberry32, type Rng } from './rng.js'
+import { fetchSolBars, fetchSolMid } from './price.js'
 import { BtcTape, type TopOfBook } from './tape.js'
 import {
   BOOK_DEPTH,
@@ -9,15 +10,19 @@ import {
   FILL_HISTORY,
   HOUSE_CENTS,
   INSTRUMENTS,
+  LAMPORTS_PER_SOL,
   LATENCY_MS,
   MAKER_BPS,
   MAX_DT_MS,
   MID_HISTORY,
   RATE_LIMIT,
   RATE_WINDOW_MS,
+  SETTLEMENT_SIGNATURES,
+  SOLANA_LAMPORTS_PER_SIGNATURE,
   STAKE_HISTORY,
   TAKER_BPS,
   feeCents,
+  type FeeModel,
   instrumentOf,
   notionalCents,
   rejectReasonMessage,
@@ -34,6 +39,21 @@ import {
   type Side,
   type UserFill,
 } from './types.js'
+
+/** Bar width the model's features use, and how many bars its lookback needs (two minutes plus one). */
+const BAR_MS = 200
+const BAR_HISTORY = 601
+
+export interface Bar {
+  ts: number
+  bid: number
+  ask: number
+  bidSize: number
+  askSize: number
+  mid: number
+  tradeSide: Side | null
+  tradeSize: number
+}
 
 const ID_RE = /^[A-Za-z0-9._:-]{1,64}$/
 const ORDER_FIELDS = new Set(['clientOrderId', 'side', 'size', 'type', 'price', 'timeInForce'])
@@ -108,6 +128,7 @@ export class Market {
   private referenceMid: number | null = null
   private mids: number[] = []
   private lastTrade: Observation['lastTrade'] = null
+  private bars: Bar[] = []
 
   private cash = HOUSE_CENTS
   private position = 0
@@ -140,11 +161,42 @@ export class Market {
   private sessionSeq = 0
   private extSeq = 0
 
+  /** Fractions of a cent of Solana fee not yet charged. Cash is whole cents, so they carry over. */
+  private feeCarry = 0
+  /** SOL price used to turn lamports into cents. Refreshed at session open and from the SOL feed. */
+  private solCents = 10_000
+
   constructor(
     tapeDirectory: string,
     private readonly chain: Chain | null = null,
+    readonly feeModel: FeeModel = 'exchange',
   ) {
     this.tape = new BtcTape(tapeDirectory)
+  }
+
+  /** Network fee of one settlement transaction, in fractional cents. */
+  solanaFeeCents(): number {
+    return ((SOLANA_LAMPORTS_PER_SIGNATURE * SETTLEMENT_SIGNATURES) / LAMPORTS_PER_SOL) * this.solCents
+  }
+
+  feeView(): { model: FeeModel; makerBps: number; takerBps: number; solanaFeeCents: number } {
+    const exchange = this.feeModel === 'exchange'
+    return {
+      model: this.feeModel,
+      makerBps: exchange ? MAKER_BPS : 0,
+      takerBps: exchange ? TAKER_BPS : 0,
+      solanaFeeCents: exchange ? 0 : this.solanaFeeCents(),
+    }
+  }
+
+  /** Whole cents to charge for one fill. Solana fees carry their fraction to the next fill. */
+  private feeFor(notional: number, liquidity: 'maker' | 'taker'): number {
+    if (this.feeModel === 'exchange') return feeCents(notional, liquidity === 'maker' ? MAKER_BPS : TAKER_BPS)
+    this.feeCarry += this.solanaFeeCents()
+    // Ten 0.1-cent fees sum to 0.9999999999999999 in floating point; that is still one cent.
+    const whole = Math.floor(this.feeCarry + 1e-9)
+    this.feeCarry -= whole
+    return whole
   }
 
   get liveOpen(): boolean {
@@ -182,6 +234,7 @@ export class Market {
     return this.run(async () => {
       if (this.data !== 'reference' || this.halted) return []
       this.referenceMid = this.align(cents)
+      this.solCents = cents
       this.source = source
       this.quoteReference()
       const events = [...(await this.crossResting()), ...(await this.maybeHalt())]
@@ -410,6 +463,11 @@ export class Market {
         episodeSteps: 1_000,
         deposit,
       })
+      await this.preroll()
+      if (this.feeModel === 'solana') {
+        const sol = await fetchSolMid()
+        if (sol) this.solCents = sol.cents
+      }
       this.session = {
         id: `sess_${++this.sessionSeq}`,
         deposit,
@@ -549,6 +607,8 @@ export class Market {
     this.stakeHistory = []
     this.lastTrade = null
     this.mids = []
+    this.bars = []
+    this.feeCarry = 0
     this.referenceMid = null
     if (this.mode !== 'live') this.session = null
     if (input.instrument.symbol === 'BTC-USDT') {
@@ -596,13 +656,14 @@ export class Market {
       }
     }
     if (this.halted && this.marketMs < target) this.marketMs = target
+    this.recordBar()
     return events
   }
 
   private async moveBook(marketMs: number): Promise<MarketEvent[]> {
     if (this.data === 'tape') {
       const top = await this.tape.advance(marketMs)
-      this.applyTop(top)
+      this.applyTop(top, marketMs)
       return []
     }
     if (this.data === 'synthetic') return this.quoteSynthetic(marketMs - this.marketMs)
@@ -610,13 +671,79 @@ export class Market {
     return []
   }
 
-  private applyTop(top: TopOfBook): void {
+  /** `ts` is the time the tape was advanced to, so a trade lands in the bar the observation reports. */
+  private applyTop(top: TopOfBook, ts = this.marketMs): void {
     this.replaceExternal(top.bid, top.bidSize, top.ask, top.askSize)
     this.mid = Math.round((top.bid + top.ask) / 2)
     if (top.trade) {
-      this.lastTrade = { ...top.trade, ts: this.marketMs }
+      this.lastTrade = { ...top.trade, ts }
     }
     this.noteMid()
+  }
+
+  /** One bar per BAR_MS of market time: top of book plus a trade printed in that bar. */
+  private recordBar(): void {
+    const bid = this.book.depth('buy', 1)[0]
+    const ask = this.book.depth('sell', 1)[0]
+    if (!bid || !ask) return
+    const bucket = Math.floor(this.marketMs / BAR_MS)
+    const trade = this.lastTrade && Math.floor(this.lastTrade.ts / BAR_MS) === bucket ? this.lastTrade : null
+    const bar: Bar = {
+      ts: this.marketMs,
+      bid: bid.price,
+      ask: ask.price,
+      bidSize: bid.size,
+      askSize: ask.size,
+      mid: this.mid,
+      tradeSide: trade ? trade.side : null,
+      tradeSize: trade ? trade.size : 0,
+    }
+    const last = this.bars[this.bars.length - 1]
+    if (last && Math.floor(last.ts / BAR_MS) === bucket) {
+      this.bars[this.bars.length - 1] = bar
+      return
+    }
+    this.bars.push(bar)
+    if (this.bars.length > BAR_HISTORY) this.bars.shift()
+  }
+
+  /**
+   * Fill the bar history with the two minutes before a live session starts, so a model's
+   * lookback window is full at t=0. BTC plays the first two minutes of the tape and the
+   * session clock starts after them. SOL rebuilds the mid from recent Coinbase trades,
+   * shifted to meet the current live mid, and quotes it the same way the live feed does.
+   * History is skipped, not faked, when it is unavailable.
+   */
+  private async preroll(): Promise<void> {
+    if (this.data === 'tape') {
+      for (let i = 1; i <= BAR_HISTORY; i += 1) {
+        this.marketMs = i * BAR_MS
+        this.applyTop(await this.tape.advance(this.marketMs), this.marketMs)
+        this.recordBar()
+      }
+      this.tape.rebase(this.marketMs)
+    } else if (this.data === 'reference') {
+      const [history, now] = await Promise.all([fetchSolBars(BAR_HISTORY * BAR_MS, BAR_MS), fetchSolMid()])
+      if (!history || !now) return
+      const shift = now.cents - history[history.length - 1]
+      for (let i = 0; i < history.length; i += 1) {
+        this.marketMs = (i + 1) * BAR_MS
+        this.referenceMid = this.align(history[i] + shift)
+        this.quoteReference()
+        this.recordBar()
+      }
+      this.source = now.source
+    } else {
+      return
+    }
+    const offset = this.marketMs
+    for (const bar of this.bars) bar.ts -= offset
+    if (this.lastTrade) this.lastTrade = { ...this.lastTrade, ts: this.lastTrade.ts - offset }
+    this.marketMs = 0
+  }
+
+  barsView(limit: number): { market: string; barMs: number; bars: Bar[] } {
+    return { market: this.instrument.symbol, barMs: BAR_MS, bars: this.bars.slice(-limit) }
   }
 
   private quoteReference(): void {
@@ -754,8 +881,8 @@ export class Market {
       const qty = Math.min(left, order.remaining)
       order.remaining -= qty
       if (order.remaining === 0) this.book.cancelId(order.orderId)
-      this.applyPool(order.side, order.price, qty, 'maker')
-      events.push(this.recordFill(order.clientOrderId, order.orderId, order.side, order.price, qty, 'maker', null))
+      const fee = this.applyPool(order.side, order.price, qty, 'maker')
+      events.push(this.recordFill(order.clientOrderId, order.orderId, order.side, order.price, qty, 'maker', null, fee))
       this.finishIfFlat(order.clientOrderId)
       this.lastTrade = { price: order.price, size: qty, side, ts: this.marketMs }
       events.push({ type: 'trade', price: order.price, size: qty, side, ts: this.marketMs })
@@ -958,13 +1085,13 @@ export class Market {
     let filled = 0
     for (const fill of result.fills) {
       if (fill.maker.account === 'pool') {
-        this.applyPool(fill.maker.side, fill.price, fill.size, 'maker')
-        events.push(this.recordFill(fill.maker.clientOrderId, fill.maker.orderId, fill.maker.side, fill.price, fill.size, 'maker', signature))
+        const fee = this.applyPool(fill.maker.side, fill.price, fill.size, 'maker')
+        events.push(this.recordFill(fill.maker.clientOrderId, fill.maker.orderId, fill.maker.side, fill.price, fill.size, 'maker', signature, fee))
         this.finishIfFlat(fill.maker.clientOrderId)
       }
       if (fill.takerAccount === 'pool') {
-        this.applyPool(side, fill.price, fill.size, liquidity)
-        events.push(this.recordFill(clientOrderId, orderId, side, fill.price, fill.size, liquidity, signature))
+        const fee = this.applyPool(side, fill.price, fill.size, liquidity)
+        events.push(this.recordFill(clientOrderId, orderId, side, fill.price, fill.size, liquidity, signature, fee))
         filled += fill.size
       }
       this.lastTrade = { price: fill.price, size: fill.size, side: fill.takerSide, ts: this.marketMs }
@@ -1089,9 +1216,10 @@ export class Market {
     return events
   }
 
-  private applyPool(side: Side, price: number, size: number, liquidity: 'maker' | 'taker'): void {
+  /** Books one pool fill and returns the fee charged for it, in whole cents. */
+  private applyPool(side: Side, price: number, size: number, liquidity: 'maker' | 'taker'): number {
     const notion = notionalCents(price, size)
-    const fee = feeCents(notion, liquidity === 'maker' ? MAKER_BPS : TAKER_BPS)
+    const fee = this.feeFor(notion, liquidity)
     if (side === 'buy') this.cash -= notion + fee
     else this.cash += notion - fee
     const prev = this.position
@@ -1103,7 +1231,7 @@ export class Market {
       this.avg = nextAbs === 0 ? 0 : Math.round((this.avg * prevAbs + price * size) / nextAbs)
       this.position = next
       this.realized -= fee
-      return
+      return fee
     }
     const close = Math.min(size, Math.abs(prev))
     const pnl =
@@ -1114,6 +1242,7 @@ export class Market {
     this.position = prev + sign * size
     if (this.position === 0) this.avg = 0
     else if (Math.sign(this.position) === sign) this.avg = price
+    return fee
   }
 
   private async chainSignature(takerSide: Side, result: { fills: MatchFill[] }): Promise<string | null> {
@@ -1136,15 +1265,15 @@ export class Market {
     size: number,
     liquidity: 'maker' | 'taker',
     signature: string | null,
+    fee: number,
   ): MarketEvent {
-    const notion = notionalCents(price, size)
     const fill: StoredFill = {
       clientOrderId,
       orderId,
       side,
       price,
       size,
-      fee: feeCents(notion, liquidity === 'maker' ? MAKER_BPS : TAKER_BPS),
+      fee,
       liquidity,
       signature,
       ts: this.marketMs,
@@ -1311,11 +1440,13 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
-export function instrumentsBody() {
+export function instrumentsBody(
+  fees: ReturnType<Market['feeView']> = { model: 'exchange', makerBps: MAKER_BPS, takerBps: TAKER_BPS, solanaFeeCents: 0 },
+) {
   return {
     houseFundCents: HOUSE_CENTS,
     deposit: { minCents: DEPOSIT_MIN, maxCents: DEPOSIT_MAX },
-    fees: { makerBps: MAKER_BPS, takerBps: TAKER_BPS },
+    fees,
     instruments: INSTRUMENTS.map((item) => ({
       symbol: item.symbol,
       base: item.base,
