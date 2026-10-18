@@ -17,9 +17,14 @@ class ApiError(Exception):
 
 
 class ModelClient:
-    """Calls only the routes in docs/model-api.md."""
+    """Calls only the routes in docs/model-api.md.
 
-    def __init__(self, base_url: str = "http://localhost:3000", timeout: float = 10.0):
+    The default is 127.0.0.1, not localhost. The server listens on IPv4 only, and
+    Windows resolves localhost to ::1 first, then waits about 2s on the refused
+    connection before trying 127.0.0.1. That 2s lands on every request.
+    """
+
+    def __init__(self, base_url: str = "http://127.0.0.1:3000", timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 

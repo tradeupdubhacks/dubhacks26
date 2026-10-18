@@ -312,7 +312,7 @@ def load_rows(base_url: str) -> tuple[list[tuple[list[float], int]], str]:
 
 
 def main() -> None:
-    rows, source = load_rows("http://localhost:3000")
+    rows, source = load_rows("http://127.0.0.1:3000")
     if len(rows) <= HORIZON * 6:
         raise SystemExit("Not enough rows to train.")
     evaluate(rows, source)
