@@ -553,18 +553,6 @@ function renderTrading() {
             </div>
             <div class="muted small" style="margin:4px 0 8px">${chartCaption(s)}</div>
             ${s ? '<canvas id="chart"></canvas>' : '<div class="chart-loading">Loading price history…</div>'}
-
-            <div class="stats">
-              <div class="stat"><div class="label">Avg daily swing</div><div class="value">${st ? pct(st.vol) : '—'}</div></div>
-              <div class="stat"><div class="label">Max drawdown</div><div class="value">${st ? '−' + pct(st.maxDD, 0) : '—'}</div></div>
-              <div class="stat"><div class="label">${s ? s.values.length : HISTORY_DAYS}-day return</div><div class="value">${st ? (st.ret >= 0 ? '+' : '') + pct(st.ret, 0) : '—'}</div></div>
-              <div class="stat"><div class="label">Best day</div><div class="value">${st ? '+' + pct(st.bestDay) : '—'}</div></div>
-              <div class="stat"><div class="label">Worst day</div><div class="value">${st ? pct(st.worstDay) : '—'}</div></div>
-              <div class="stat"><div class="label">Latest price</div><div class="value">${s && s.latestCents ? usd(s.latestCents) : '—'}</div></div>
-            </div>
-
-            <strong class="small" style="display:block;margin-top:14px">Things to know</strong>
-            <ul class="factors">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>
           </div>
 
           <div class="card">
