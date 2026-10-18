@@ -212,7 +212,7 @@ async def session(base_url: str) -> None:
                 await _send(socket, decision, sent_at, inflight, view)
 
 
-async def run(base_url: str = "http://localhost:3000") -> None:
+async def run(base_url: str = "http://127.0.0.1:3000") -> None:
     while True:
         try:
             await session(base_url)

@@ -8,6 +8,7 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
 } from '@solana/web3.js'
@@ -194,6 +195,18 @@ export class LocalSolana implements Chain {
   private async fund(owner: Keypair): Promise<void> {
     const balance = await this.connection.getBalance(owner.publicKey)
     if (balance >= LAMPORTS_PER_SOL) return
+    // requestAirdrop fails on Windows: the RPC dials the faucet at 0.0.0.0:9900, and
+    // Windows refuses to connect to 0.0.0.0 (os error 10049). Pay from the faucet key
+    // the validator wrote into its ledger instead. A validator we did not start has no
+    // such file here, so it still gets the airdrop.
+    const faucet = readFaucet(join(this.directory, 'ledger', 'faucet-keypair.json'))
+    if (faucet) {
+      const tx = new Transaction().add(
+        SystemProgram.transfer({ fromPubkey: faucet.publicKey, toPubkey: owner.publicKey, lamports: 2 * LAMPORTS_PER_SOL }),
+      )
+      await sendAndConfirmTransaction(this.connection, tx, [faucet], { commitment: 'confirmed' })
+      return
+    }
     const signature = await this.connection.requestAirdrop(owner.publicKey, 2 * LAMPORTS_PER_SOL)
     await this.connection.confirmTransaction(signature, 'confirmed')
   }
@@ -250,6 +263,11 @@ function loadKeypair(path: string): Keypair {
   const key = Keypair.generate()
   writeFileSync(path, JSON.stringify(Array.from(key.secretKey)))
   return key
+}
+
+function readFaucet(path: string): Keypair | null {
+  if (!existsSync(path)) return null
+  return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(path, 'utf8')) as number[]))
 }
 
 function readMints(path: string): MintFile | null {
