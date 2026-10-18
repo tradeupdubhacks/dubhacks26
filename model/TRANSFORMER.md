@@ -31,6 +31,7 @@ Enter (IOC at the touch +- 2 ticks) when confidence >= 0.72, sized to the larges
 | --- | --- | --- | --- | --- |
 | **fees off (platform default)** | 5,042 (210/h) | +$229.80 | $0 | **+$229.80** |
 | fees 2 bps maker / 5 bps taker | 135 | +$5.30 | -$105.02 | **-$99.72** |
+| Solana network fee only (0.1 cent per fill, `FEE_MODEL=solana` on origin/balls) | 5,042 | +$229.80 | -$10.08 | **+$219.72** (`hft/research/23_solana_fee_check.py`) |
 | fees off, page defaults (-20% / +5%) | 114 | +$5.04 | $0 | +$5.04, goal reached after ~40 min |
 
 With fees off: profitable in 23 of 23 hours (worst +$1.6, best +$21), 75.6 % of closed trades win, +5.5 cents average, largest stake dip $1.77.

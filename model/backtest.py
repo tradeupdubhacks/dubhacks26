@@ -176,8 +176,11 @@ def run_session(tape: Tape, conf: np.ndarray, vol: np.ndarray, direction: np.nda
 class StepEnv:
     """A small model-API server on the same replay: place, ioc/limit, flatten, cancel_all, fees, 50 ms delay, rails."""
 
-    def __init__(self, tape: Tape, deposit: int, floor: int, ceiling: int, j0: int) -> None:
+    def __init__(self, tape: Tape, deposit: int, floor: int, ceiling: int, j0: int, network_fee_cents: float = 0.0) -> None:
         self.t, self.deposit, self.floor, self.ceiling = tape, deposit, floor, ceiling
+        # Solana model of the server's fees (FEE_MODEL=solana on origin/balls): each fill pays its settlement transaction's network fee,
+        # two 5,000-lamport signatures at the SOL price, about 0.1 cent at $100; the fraction of a cent carries to the next fill.
+        self.network_fee_cents, self._fee_carry = network_fee_cents, 0.0
         self.i = SUB * j0
         self.pos, self.avg, self.realized, self.fees = 0, 0.0, 0, 0
         self.open: list[dict] = []
@@ -193,6 +196,11 @@ class StepEnv:
     def _apply(self, side: str, price: int, size: int, bps: float) -> None:
         signed = size if side == "buy" else -size
         self.fees += fee_cents(price, size, bps)
+        if self.network_fee_cents:
+            self._fee_carry += self.network_fee_cents
+            whole = int(self._fee_carry + 1e-9)
+            self._fee_carry -= whole
+            self.fees += whole
         if self.pos == 0 or (self.pos > 0) == (signed > 0):
             total = abs(self.pos) + size
             self.avg = (self.avg * abs(self.pos) + price * size) / total
