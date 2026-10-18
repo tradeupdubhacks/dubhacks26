@@ -668,7 +668,7 @@ function renderCheckout() {
 function completeOrder(paidC) {
   state = defaultState(); save(); updateCartCount();
   app.innerHTML = `<div class="page"><div class="card"><h2>Order placed ✅</h2>
-    <p class="muted">You paid ${moneyC(paidC)}. (Placeholder confirmation.)</p><a class="btn" href="#/">Keep shopping</a></div></div>`;
+    <p class="muted">You paid ${moneyC(paidC)}. </p><a class="btn" href="#/">Keep shopping</a></div></div>`;
 }
 
 /* ============================================================
