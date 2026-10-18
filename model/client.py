@@ -71,6 +71,10 @@ class ModelClient:
     def account(self) -> dict:
         return self.request("GET", "/v1/account")
 
+    def bars(self, limit: int = 601) -> dict:
+        """Recent 200ms bars, including the two minutes the server plays before a session."""
+        return self.request("GET", f"/v1/bars?limit={limit}")
+
     def reset(self, body: dict | None = None) -> dict:
         return self.request("POST", "/v1/reset", body or {})
 

@@ -253,14 +253,6 @@ def decide(
             return Decision(cancels=[order["clientOrderId"] for order in (extras or orders)], reason="cancel")
         return Decision(reason="working")
     if delta == 0:
-        # #region agent log
-        try:
-            import json, time
-            with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-                _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "A", "location": "policy.py:decide", "message": "no order", "data": {"reason": "hold", "expectedBps": expected_bps, "enterBps": enter_bps, "position": position, "capacity": capacity, "orders": 0}, "timestamp": int(time.time() * 1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return Decision(reason="hold")
 
     side = "buy" if delta > 0 else "sell"
@@ -271,14 +263,6 @@ def decide(
         return Decision(reason="position_limit")
     price = aggressive_price(side, bid, ask, limits.price_tick_cents)
     reason = "enter" if position == 0 else ("reverse" if desired * position < 0 else "exit")
-    # #region agent log
-    try:
-        import json, time
-        with open(r"C:\Akash\Coding\dubhacks26\debug-a0c237.log", "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({"sessionId": "a0c237", "hypothesisId": "C", "location": "policy.py:decide", "message": "order", "data": {"reason": reason, "expectedBps": expected_bps, "enterBps": enter_bps, "side": side, "size": size, "orders": 1}, "timestamp": int(time.time() * 1000)}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return Decision(
         orders=[
             {

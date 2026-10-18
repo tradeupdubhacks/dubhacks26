@@ -26,7 +26,7 @@ describe('gateway', () => {
     assert.equal(health.statusCode, 200)
     assert.equal(health.json().execution, 'fake')
     const instruments = await app.inject({ method: 'GET', url: '/v1/instruments' })
-    assert.equal(instruments.json().houseFundCents, 100_000)
+    assert.equal(instruments.json().houseFundCents, 10_000_000)
     assert.ok(instruments.json().instruments.some((item: { symbol: string }) => item.symbol === 'SOL-USD'))
     const session = await app.inject({ method: 'GET', url: '/v1/session' })
     assert.deepEqual(session.json(), { status: 'idle' })

@@ -37,11 +37,41 @@ class Scorer:
         self.bucket = None
         self.ready = False
 
+    def seed(self, bars: list[dict]) -> int:
+        """Load server history from GET /v1/bars so the lookback window is full at once.
+
+        Bars before the session have negative ts. Returns how many bars the window holds.
+        """
+        for item in bars:
+            sign = {"buy": 1, "sell": -1}.get(item.get("tradeSide"), 0)
+            bar = (
+                int(item["bid"]),
+                int(item["ask"]),
+                max(0, int(item["bidSize"])),
+                max(0, int(item["askSize"])),
+                int(item["mid"]),
+                sign,
+                max(0, int(item.get("tradeSize") or 0)) if sign else 0,
+                1,
+            )
+            self._push(bar, int(item["ts"]) // self.bar_ms)
+        return len(self.bars)
+
     def update(self, observation: dict) -> float:
         bar = bar_from_observation(observation)
         if bar is None:
             return 0.0
-        bucket = int(observation.get("ts") or 0) // self.bar_ms
+        self._push(bar, int(observation.get("ts") or 0) // self.bar_ms)
+        vector = features_from_bars(self.bars)
+        if vector is None:
+            return 0.0
+        self.ready = True
+        scaled = (np.asarray(vector, dtype=np.float32) - self.mean) / self.std
+        with torch.no_grad():
+            pred = self.net(torch.from_numpy(scaled).unsqueeze(0))
+        return float(pred[0, self.horizon_index])
+
+    def _push(self, bar: tuple, bucket: int) -> None:
         if self.bucket is not None and bucket < self.bucket:
             self.reset()
         if self.bucket is None:
@@ -59,11 +89,3 @@ class Scorer:
             self.bucket = bucket
             if len(self.bars) > WARMUP:
                 self.bars = self.bars[-WARMUP:]
-        vector = features_from_bars(self.bars)
-        if vector is None:
-            return 0.0
-        self.ready = True
-        scaled = (np.asarray(vector, dtype=np.float32) - self.mean) / self.std
-        with torch.no_grad():
-            pred = self.net(torch.from_numpy(scaled).unsqueeze(0))
-        return float(pred[0, self.horizon_index])

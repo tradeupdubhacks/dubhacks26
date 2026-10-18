@@ -44,7 +44,7 @@ const REASON_NOTES = {
 // Defaults used until (or unless) GET /v1/instruments answers.
 let market = {
   loaded: false,
-  houseFundCents: 100000,
+  houseFundCents: 10000000,
   depositMin: 100,
   depositMax: 10000,
   fees: { makerBps: 2, takerBps: 5 },

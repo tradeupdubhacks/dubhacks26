@@ -149,9 +149,6 @@ export class LocalSolana implements Chain {
 
   private async launch(): Promise<void> {
     const bin = findValidator()
-    // #region agent log
-    debugLog('A', 'chain.ts:launch', 'validator lookup', { platform: process.platform, bin, delimiter })
-    // #endregion
     if (!bin) {
       throw new ChainError(
         'Nothing is listening on the local Solana RPC, and solana-test-validator is not installed. Install the Agave CLI and restart.',
@@ -160,54 +157,24 @@ export class LocalSolana implements Chain {
     const prepared = prepareLedger(this.directory)
     const args = ['--quiet', '--bind-address', '127.0.0.1', '--rpc-port', String(this.port), '--ledger', prepared.ledger]
     if (prepared.reset) args.unshift('--reset')
-    // #region agent log
-    debugLog('C', 'chain.ts:launch', 'spawn plan', {
-      reset: prepared.reset,
-      voteKeypair: existsSync(join(prepared.ledger, 'vote-account-keypair.json')),
-      pathHasDelimiter: `${dirname(bin)}${delimiter}${process.env.PATH ?? ''}`.includes(delimiter),
-    })
-    // #endregion
     const logPath = join(this.directory, 'validator.log')
     const log = openSync(logPath, 'a')
     this.child = spawn(bin, args, {
       stdio: ['ignore', log, log],
       env: { ...process.env, PATH: `${dirname(bin)}${delimiter}${process.env.PATH ?? ''}` },
     })
-    // #region agent log
-    this.child.on('exit', (code, signal) => {
-      fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'C',location:'chain.ts:child-exit',message:'validator child exited',data:{code,signal,tail:readTail(logPath).slice(-300)},timestamp:Date.now()})}).catch(()=>{});
-    })
-    // #endregion
     for (let attempt = 0; attempt < 60; attempt += 1) {
       if (await this.reachable()) {
-        // #region agent log
-        debugLog('D', 'chain.ts:launch', 'validator accepted rpc', { exitCode: this.child.exitCode, attempt })
-        // #endregion
         return
       }
       if (this.child.exitCode !== null && this.child.exitCode !== 0) break
       await delay(500)
     }
-    // #region agent log
-    debugLog('D', 'chain.ts:launch', 'validator exited before rpc', {
-      exitCode: this.child.exitCode,
-      tail: readTail(logPath),
-    })
-    // #endregion
     throw new ChainError(`The local validator exited before ${this.rpc} accepted requests. See .local-solana/validator.log.`)
   }
 
   private async fund(owner: Keypair): Promise<void> {
     const balance = await this.connection.getBalance(owner.publicKey)
-    let slot: number | null = null
-    try {
-      slot = await this.connection.getSlot()
-    } catch {
-      slot = null
-    }
-    // #region agent log
-    fetch('http://127.0.0.1:7369/ingest/3591278b-84bb-41dc-9d14-fd265e39f7e7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'706954'},body:JSON.stringify({sessionId:'706954',hypothesisId:'A',location:'chain.ts:fund',message:'before airdrop',data:{balance,slot,childExit:this.child?.exitCode ?? null},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (balance >= LAMPORTS_PER_SOL) return
     const signature = await this.connection.requestAirdrop(owner.publicKey, 2 * LAMPORTS_PER_SOL)
     await this.connection.confirmTransaction(signature, 'confirmed')
@@ -323,21 +290,6 @@ function findValidator(): string | null {
     }
   }
   return null
-}
-
-function readTail(path: string): string {
-  try {
-    const text = readFileSync(path, 'utf8')
-    return text.slice(-500)
-  } catch {
-    return ''
-  }
-}
-
-function debugLog(hypothesisId: string, location: string, message: string, data: Record<string, unknown>): void {
-  // #region agent log
-  fetch('http://127.0.0.1:7748/ingest/915e487c-8a5b-406d-b678-18f32daeae4b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7e57ff'},body:JSON.stringify({sessionId:'7e57ff',runId:'post-fix',hypothesisId,location,message,data,timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 }
 
 function delay(ms: number): Promise<void> {

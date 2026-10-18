@@ -1,4 +1,4 @@
-export const HOUSE_CENTS = 100_000
+export const HOUSE_CENTS = 10_000_000
 export const DEPOSIT_MIN = 100
 export const DEPOSIT_MAX = 10_000
 export const MAKER_BPS = 2

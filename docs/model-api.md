@@ -24,7 +24,7 @@ Two ways to run, and they do not overlap:
 
 | Field | Meaning |
 | --- | --- |
-| `*Cents` | Dummy USD cents. `100000` is the `$1000` house fund. |
+| `*Cents` | Dummy USD cents. `10000000` is the `$100,000` house fund. |
 | `price` | Integer USD cents for **one** whole base coin. Must be a multiple of the instrument's `priceTickCents`. |
 | `size` | Integer lots. One lot is `0.001` base coin. |
 | `ts` on events | Market time in milliseconds. In training this is the episode clock, starting at `0` on reset. In a live session this is the session clock, starting at `0` when the session is created. It is not a wall-clock timestamp. |
@@ -307,6 +307,39 @@ A snapshot of the book only.
 - Poll once before subscribing, to seed a strategy that does not want the account block.
 - Reconcile a stream gap. The book route is the current book, not a delta.
 
+### `GET /v1/bars`
+
+Recent 200ms bars of the current market, oldest first, so a model can fill its lookback window without waiting.
+
+When a live session opens, the server first plays two minutes of history into this buffer, so `limit=601` is full at `ts` 0:
+
+- `BTC-USDT` plays the first two minutes of the tape. The session clock then starts at the tape position after them.
+- `SOL-USD` rebuilds the mid from recent Coinbase `SOL-USD` trades. The series is shifted to meet the current live mid and quoted the same way as the live feed. If Coinbase cannot be reached, there is no history and the buffer fills live.
+
+History bars have negative `ts`. After the open, the server adds one bar per 200ms of market time.
+
+**Query.** `limit`: integer from `1` to `601`. Default `601`.
+
+**Response 200**
+
+```json
+{
+  "market": "BTC-USDT",
+  "barMs": 200,
+  "bars": [
+    { "ts": -120000, "bid": 8357560, "ask": 8357570, "bidSize": 2969, "askSize": 2709, "mid": 8357565, "tradeSide": "buy", "tradeSize": 3 }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `ts` | integer | Market time in ms at the end of the bar. Negative before the session opened. |
+| `bid`, `ask`, `mid` | integer | Top of book and mid, in cents. |
+| `bidSize`, `askSize` | integer | Lots at the top of book. |
+| `tradeSide` | `"buy"` \| `"sell"` \| `null` | Aggressor of a trade printed in this bar, or `null`. |
+| `tradeSize` | integer | Lots of that trade. `0` with no trade. |
+
 ### `GET /v1/account`
 
 The full [Observation](#observation).
@@ -340,7 +373,7 @@ Start a training episode. Refused while a live session exists.
 }
 ```
 
-`observation.step` is `0`, `observation.ts` is `0`, `observation.clock` is `"step"`, position is `0`, and equity is the `$1000` house fund (`100000` cents) with no user deposit. The idempotency cache and open orders are cleared.
+`observation.step` is `0`, `observation.ts` is `0`, `observation.clock` is `"step"`, position is `0`, and equity is the `$100,000` house fund (`10000000` cents) with no user deposit. The idempotency cache and open orders are cleared.
 
 **Response 409.** `session_open`.
 

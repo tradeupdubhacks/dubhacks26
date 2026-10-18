@@ -8,7 +8,7 @@ import time
 
 import websockets
 
-from model.client import ModelClient
+from model.client import ApiError, ModelClient
 from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
 from model.score import Scorer
 
@@ -182,6 +182,20 @@ async def session(base_url: str) -> None:
             if limits is None:
                 continue
             view = inflight.view(observation, now)
+            if scorer.bucket is not None and int(observation.get("ts") or 0) // scorer.bar_ms < scorer.bucket:
+                # The clock went back: a new session replaced the old one. Load its history too.
+                scorer.reset()
+                announced = False
+                ready_announced = False
+            if scorer.bucket is None:
+                # Start from the server's bar history instead of waiting two minutes to build one.
+                try:
+                    history = client.bars()
+                    if history.get("market") == symbol:
+                        loaded = scorer.seed(history.get("bars") or [])
+                        print(f"loaded {loaded} bars of price history from the server")
+                except ApiError as error:
+                    print(f"no bar history ({error.code}), building the window live")
             expected = scorer.update(observation)
             if not scorer.ready and not announced:
                 print("waiting 2 minutes for a price window before sending orders")
