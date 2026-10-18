@@ -5,12 +5,12 @@ Buy-now-pay-later lets you split a price over time. We asked a different questio
 
 ## What it does
 - A storefront where the customer picks a coin, an amount, a **goal** and a **loss limit**, then starts a live session.
-- A simulated exchange replays recorded Bitcoin order-book data (and follows a live Solana price). A session's stake is the deposit plus the pool's profit or loss, and it **halts itself at the floor or ceiling**.
+- A simulated exchange follows the **live Binance Bitcoin order book** (or replays a recorded day) and a live Solana price. A session's stake is the deposit plus the pool's profit or loss, and it **halts itself at the floor or ceiling**.
 - A **Trading model** dropdown on the page: a small neural network, a **transformer** over the last 30 seconds of order-book ticks, the team's forecasting network, an order-book HFT rule, or none. The server launches the chosen bot and stops it when the session ends.
 - Fills settle as token transfers on a local Solana validator; each fill pays a ~0.1 cent network fee and no exchange fee.
 
 ## How we built it
-- **Server:** TypeScript/Fastify, an in-memory matching engine with a 50 ms order delay, floor/ceiling halts, a tape replay of Binance `BTCUSDT`, and a bot launcher (`src/bot.ts`).
+- **Server:** TypeScript/Fastify, an in-memory matching engine with a 50 ms order delay, floor/ceiling halts, a live Binance `BTCUSDT` feed (or a recorded tape), and a bot launcher (`src/bot.ts`).
 - **Page:** a static single-page app talking to the client API and a read-only watch socket.
 - **Models:** PyTorch. One shared feature function builds inputs for training *and* live use, and a test proves the two paths give identical numbers.
 - **Backtester:** a replica of the server's fill rules, checked against the real server (same positions on every step, equity within 4 cents over 4.8 hours).
@@ -19,12 +19,12 @@ Buy-now-pay-later lets you split a price over time. We asked a different questio
 ## Challenges we ran into
 - **The edge is tiny.** A 5-second forecast is worth about 0.6 bps per trade; a normal exchange fee costs 4 to 10 bps. With 2/5 bps fees the transformer loses nearly everything.
 - **Fooling ourselves.** We tested about 130 ideas on longer horizons. Several looked good in one year or on one coin; the most promising (positioning data) **failed to replicate** on five other coins, so we reported it as noise.
-- **One recorded day** is what the live demo replays, and its first minutes are quiet. A strict entry rule meant a two-minute wait for the first trade; we measured the trade-off and lowered the entry bar, so it now trades within seconds.
+- **Reproducibility.** Live sessions follow the real market, so no two runs match (a recorded day is available for repeatable tests), and the recording's first minutes are quiet. A strict entry rule meant a two-minute wait for the first trade; we measured the trade-off and lowered the entry bar, so it now trades within seconds.
 - **Merging four people's work:** two fee models, two `SignalNet` classes, a rewritten bot loop, and stray test servers on the same port.
 
 ## Accomplishments we're proud of
 - A working path from a click on the page to a live bot trading a protected stake, with tests (60 Python, 28 server).
-- On the replayed day, which the transformer never saw, it made **+$219.72 on a $100 deposit** (after the Solana fee), profitable in all 23 hours with a $1.77 worst dip.
+- On a recorded day the transformer never saw, it made **+$219.72 on a $100 deposit** (after the Solana fee), profitable in all 23 hours with a $1.77 worst dip. A first test on the live Binance book (dummy money, 6 minutes, a $20 stake) ended **+$0.72**; a very small sample.
 - A research record that includes the negative results, with out-of-sample tests, held-out days and replication checks.
 
 ## What we learned

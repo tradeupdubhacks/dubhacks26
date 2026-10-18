@@ -49,7 +49,7 @@ Held-out rank correlation 0.22, gross edge 0.63 bps at the top 10 % of calls (0.
   (10 lots is about $835 against thousands of lots at the touch), and fills happen at the quoted price after only the 50 ms delay.
 - One replay day for the end-to-end result. On the 4 held-out Binance days the edge was positive on all four (0.39 to 0.70 bps at the top 10 %), so the
   sign is stable, but the dollar figure above is one day.
-- The live session replays that one day at wall-clock speed, so the page shows its first minutes and hours, not a different market.
+- By default (`BTC_FEED=live`) a session now follows the live Binance book, which this model never saw: a first 6-minute test on a $20 stake made +$0.72 over ~36 fills (very small sample, same generous simulator assumptions). With `BTC_FEED=tape` the session replays the recording from its start (after a 2-minute pre-roll), so the page shows that day's first minutes and hours.
 
 ## Entry confidence: speed and profit (`hft/research/24_transformer_start_speed.py`, `25_threshold_validation.py`)
 Full-day P&L on a $20 stake sized to a $16 floor (about 18 lots), Solana fee only, session started as the live server starts it. Chosen on the
