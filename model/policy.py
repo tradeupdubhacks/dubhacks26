@@ -13,6 +13,11 @@ TAKER_BPS = 5
 MAKER_BPS = 2
 SHOCK_BPS = 50
 WIDE_SPREAD_BPS = 5.0
+# A quiet book still crosses once per this window. The forecast chooses the side.
+TRADE_EVERY_MS = 5_000
+# The server sits on an order for 50ms. On the BTC tape the touch often moves
+# several dollars in that gap, and a limit at the old ask is canceled.
+LATENCY_CROSS_BPS = 80
 
 
 @dataclass
@@ -121,6 +126,19 @@ class IdSource:
                 return client_order_id
 
 
+def crossing_price(side: str, bid: int, ask: int, tick: int, mid: int) -> int:
+    """IOC limit that still reaches the touch after the matching delay."""
+    price = aggressive_price(side, bid, ask, tick)
+    cushion = max(tick, mid * LATENCY_CROSS_BPS // 10_000)
+    if tick > 1:
+        cushion -= cushion % tick
+        if cushion < tick:
+            cushion = tick
+    if side == "buy":
+        return price + cushion
+    return max(tick, price - cushion)
+
+
 def aggressive_price(side: str, bid: int, ask: int, tick: int) -> int:
     if side == "buy":
         price = round_tick(ask, tick, "sell")
@@ -150,6 +168,23 @@ def deploy_lots(observation: dict, price: int, limits: InstrumentLimits) -> int:
         return allowed
     target = max(1, int(int(stake) * 1000 / price))
     return max(1, min(target, allowed, limits.max_order_lots, limits.max_position_lots))
+
+
+def pace_lots(position: int, capacity: int, expected_bps: float) -> int:
+    """Step one lot with the forecast. At the cap, take one lot off so the next step can trade."""
+    cap = max(1, capacity)
+    if expected_bps > 0:
+        direction = 1
+    elif expected_bps < 0:
+        direction = -1
+    elif position > 0:
+        direction = -1
+    else:
+        direction = 1
+    stepped = position + direction
+    if stepped > cap or stepped < -cap:
+        stepped = position - direction
+    return int(max(-cap, min(cap, stepped)))
 
 
 def desired_lots(
@@ -213,6 +248,7 @@ def decide(
     horizon_bars: int,
     held_bars: int,
     ids: IdSource,
+    idle_ms: int = 0,
 ) -> Decision:
     if observation.get("halted"):
         return Decision(reason="halted")
@@ -233,7 +269,11 @@ def decide(
         return Decision(flatten=True, reason="near_rail")
 
     spread_bps = (ask - bid) / mid * 1e4 if mid else 0.0
-    if spread_bps > WIDE_SPREAD_BPS:
+    due = idle_ms >= TRADE_EVERY_MS
+    # A wide book used to return here for the whole session. BTC is tight, but a
+    # fill was then held for an hour, so both markets went quiet. The 5s pace
+    # still crosses either book.
+    if spread_bps > WIDE_SPREAD_BPS and not due:
         if position == 0 and not _open_orders(observation):
             return Decision(reason="wide_spread")
         desired = position
@@ -242,6 +282,12 @@ def decide(
             expected_bps, position, held_bars, enter_bps, exit_bps, horizon_bars, capacity
         )
     orders = _open_orders(observation)
+    paced = False
+    if due and not orders and desired == position and capacity >= 1:
+        nudged = pace_lots(position, capacity, expected_bps)
+        if nudged != position:
+            desired = nudged
+            paced = True
     delta = desired - position
     if orders:
         if delta == 0:
@@ -261,8 +307,15 @@ def decide(
         size -= 1
     if size < 1:
         return Decision(reason="position_limit")
-    price = aggressive_price(side, bid, ask, limits.price_tick_cents)
-    reason = "enter" if position == 0 else ("reverse" if desired * position < 0 else "exit")
+    price = crossing_price(side, bid, ask, limits.price_tick_cents, mid)
+    if paced:
+        reason = "pace"
+    elif position == 0:
+        reason = "enter"
+    elif desired * position < 0:
+        reason = "reverse"
+    else:
+        reason = "exit"
     return Decision(
         orders=[
             {

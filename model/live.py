@@ -9,7 +9,7 @@ import time
 import websockets
 
 from model.client import ApiError, ModelClient
-from model.policy import Decision, IdSource, InstrumentLimits, decide, within_rate_limit
+from model.policy import TRADE_EVERY_MS, Decision, IdSource, InstrumentLimits, decide, within_rate_limit
 from model.score import Scorer
 
 
@@ -131,6 +131,9 @@ async def session(base_url: str) -> None:
     announced = False
     ready_announced = False
     entry_ts: int | None = None
+    last_trade_ts: int | None = None
+    last_trade_wall: float | None = None
+    seen_position: int | None = None
     last_sign = 0
     print(
         f"connected to {client.ws_url()}, enter {scorer.enter_bps:.1f} bps "
@@ -160,6 +163,9 @@ async def session(base_url: str) -> None:
             if observation.get("stakeCents") is None and not observation.get("halted"):
                 scorer.reset()
                 entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
                 last_sign = 0
                 announced = False
                 ready_announced = False
@@ -171,6 +177,11 @@ async def session(base_url: str) -> None:
                 print("live session found")
                 waiting = False
                 scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
                 announced = False
                 ready_announced = False
             now = loop.time()
@@ -185,6 +196,11 @@ async def session(base_url: str) -> None:
             if scorer.bucket is not None and int(observation.get("ts") or 0) // scorer.bar_ms < scorer.bucket:
                 # The clock went back: a new session replaced the old one. Load its history too.
                 scorer.reset()
+                entry_ts = None
+                last_trade_ts = None
+                last_trade_wall = None
+                seen_position = None
+                last_sign = 0
                 announced = False
                 ready_announced = False
             if scorer.bucket is None:
@@ -215,8 +231,20 @@ async def session(base_url: str) -> None:
                 entry_ts = ts
             last_sign = sign
             held = 0 if entry_ts is None else max(0, (ts - entry_ts) // scorer.bar_ms)
-            # Hold at least an hour so a stake-sized position is not closed on every wiggle.
-            horizon = max(scorer.horizon_bars, 18_000)
+            # One BTC lot is the whole stake. Holding that fill for the forecast
+            # horizon (or an hour) is why BTC went as quiet as SOL. A position
+            # may sit for 5s, and the clock starts when the position changes,
+            # so a canceled IOC does not count as a trade.
+            if seen_position is None:
+                seen_position = position
+            elif position != seen_position:
+                last_trade_ts = ts
+                last_trade_wall = now
+                seen_position = position
+            market_idle = TRADE_EVERY_MS if last_trade_ts is None else max(0, ts - last_trade_ts)
+            wall_idle = TRADE_EVERY_MS if last_trade_wall is None else max(0.0, (now - last_trade_wall) * 1000)
+            idle_ms = int(max(market_idle, wall_idle))
+            horizon = max(1, TRADE_EVERY_MS // max(1, scorer.bar_ms))
             decision = decide(
                 view,
                 limits,
@@ -226,6 +254,7 @@ async def session(base_url: str) -> None:
                 horizon,
                 held,
                 ids,
+                idle_ms,
             )
             if decision.reason == "halted":
                 if not halted:
