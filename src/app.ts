@@ -129,6 +129,12 @@ export async function buildApp(options?: {
     return reply.code(500).send({ error: { code: 'internal', message: 'Internal error.' } })
   })
 
+  app.addHook('onRequest', async (request, reply) => {
+  reply.header('Access-Control-Allow-Origin', '*')
+  reply.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
+  reply.header('Access-Control-Allow-Headers', 'Content-Type')
+  if (request.method === 'OPTIONS') return reply.code(204).send()})
+
   await app.register(websocket)
 
   app.get('/', async (_request, reply) => {

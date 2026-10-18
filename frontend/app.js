@@ -1,10 +1,12 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const API_BASE = 'http://localhost:3001'; // trading server (client API)
+const API_BASE = 'http://localhost:3000'; // trading server (client API)
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const STORAGE_KEY = 'shopState.v2';
 const HISTORY_DAYS = 90;
+const HISTORY_PATH = '/v1/history'; // coin price candles (confirmed: GET /v1/history, branch "balls", src/app.ts)
+const HISTORY_INTERVAL = '1d';
 
 /* ============================================================
    DATA
@@ -15,8 +17,8 @@ const PRODUCTS = [
   { id: 'p3', name: 'Travel Backpack',     price: 54.50,  emoji: '🎒', desc: '25L, water resistant.' },
 ];
 
-// Display info per coin. The server only supplies symbol, base and data type,
-// and has no history endpoint, so the chart and stats below are simulated placeholders.
+// Display info per coin. The server supplies symbol, base and data type; price history comes
+// from GET /v1/history (see loadHistory). The seeded series below is only a fallback.
 const COIN_META = {
   BTC: { name: 'Bitcoin', seed: 22, drift: 0.0008, vol: 0.025,
     notes: ['Steadier of the two: smaller swings', 'Tends to lead the rest of the crypto market'] },
@@ -71,27 +73,36 @@ function gauss(rand) {
 }
 const hashSeed = s => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
 
-function buildHistory(c) {
-  const rand = mulberry32(c.seed);
-  const history = [100];
-  const returns = [];
-  for (let i = 0; i < HISTORY_DAYS; i++) {
-    const r = c.drift + c.vol * gauss(rand);
-    returns.push(r);
-    history.push(history[history.length - 1] * (1 + r));
-  }
+// prices: closes, oldest first. Returns the series rebased to 100 plus the stats the page shows.
+function summarize(prices) {
+  const values = prices.map(p => (p / prices[0]) * 100);
+  const returns = values.slice(1).map((v, i) => v / values[i] - 1);
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const stdev = Math.sqrt(returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length);
-  let peak = history[0], maxDD = 0;
-  history.forEach(v => { peak = Math.max(peak, v); maxDD = Math.max(maxDD, (peak - v) / peak); });
-  c.history = history;
-  c.stats = {
-    vol: stdev,
-    maxDD,
-    ret: history[history.length - 1] / history[0] - 1,
-    bestDay: Math.max(...returns),
-    worstDay: Math.min(...returns),
+  let peak = values[0], maxDD = 0;
+  values.forEach(v => { peak = Math.max(peak, v); maxDD = Math.max(maxDD, (peak - v) / peak); });
+  return {
+    values,
+    stats: {
+      vol: stdev,
+      maxDD,
+      ret: values[values.length - 1] / values[0] - 1,
+      bestDay: Math.max(...returns),
+      worstDay: Math.min(...returns),
+    },
   };
+}
+
+// Fallback only: a seeded random walk used when the history endpoint can't be reached.
+function buildHistory(c) {
+  const rand = mulberry32(c.seed);
+  const prices = [100];
+  for (let i = 1; i < HISTORY_DAYS; i++) {
+    prices.push(prices[i - 1] * (1 + c.drift + c.vol * gauss(rand)));
+  }
+  const { values, stats } = summarize(prices);
+  c.history = values;
+  c.stats = stats;
 }
 
 const coinCache = {};
@@ -108,11 +119,61 @@ function getCoin(inst) {
 const coins = () => market.instruments.map(getCoin);
 const selectedCoin = () =>
   getCoin(market.instruments.find(i => i.symbol === state.trade.symbol) || market.instruments[0]);
-const maxVol = () => Math.max(...coins().map(c => c.stats.vol));
+
+/* ============================================================
+   COIN PRICE HISTORY (GET /v1/history: public daily candles)
+   ============================================================ */
+const histories = {}; // symbol -> { status: 'loading' | 'ok' | 'error', ... }
+
+async function loadHistory(inst) {
+  const h = histories[inst.symbol];
+  if (h && (h.status !== 'error' || Date.now() - h.at < 15000)) return; // loaded, loading, or failed recently
+  histories[inst.symbol] = { status: 'loading' };
+  try {
+    const q = `symbol=${encodeURIComponent(inst.base)}&interval=${HISTORY_INTERVAL}&limit=${HISTORY_DAYS}`;
+    const r = await api(`${HISTORY_PATH}?${q}`);
+    const closes = (r.candles || []).map(k => k.closeCents).filter(n => n > 0);
+    if (closes.length < 2) throw new Error('not enough history');
+    const { values, stats } = summarize(closes);
+    histories[inst.symbol] = { status: 'ok', values, stats, source: r.source, latestCents: closes[closes.length - 1] };
+  } catch {
+    histories[inst.symbol] = { status: 'error', at: Date.now() };
+  }
+  refreshHistoryUI();
+}
+
+// What the page shows for a coin: real history, the simulated fallback, or null while loading.
+function series(c) {
+  const h = histories[c.symbol];
+  if (h && h.status === 'ok') return { ...h, simulated: false };
+  if (h && h.status === 'error') return { values: c.history, stats: c.stats, simulated: true };
+  return null;
+}
+const volOf = c => { const s = series(c); return s ? s.stats.vol : null; };
+const maxVol = () => Math.max(0.0001, ...coins().map(c => volOf(c) || 0));
 function volLevel(c) {
-  const sorted = coins().map(x => x.stats.vol).sort((a, b) => a - b);
-  const frac = sorted.length > 1 ? sorted.indexOf(c.stats.vol) / (sorted.length - 1) : 0;
+  const vols = coins().map(volOf);
+  if (vols.some(v => v === null)) return null; // wait until every coin has loaded so the ranking is fair
+  const sorted = [...vols].sort((a, b) => a - b);
+  const frac = sorted.length > 1 ? sorted.indexOf(volOf(c)) / (sorted.length - 1) : 0;
   return frac < 0.34 ? 'low' : frac < 0.67 ? 'medium' : 'high';
+}
+function volTag(c, word) {
+  const lv = volLevel(c);
+  return lv ? `<span class="tag ${lv}">${lv} ${word}</span>` : '<span class="tag pending">…</span>';
+}
+function chartCaption(s) {
+  if (!s) return `Growth of $100 over the last ${HISTORY_DAYS} days`;
+  if (s.simulated) return `Growth of $100 over the last ${HISTORY_DAYS} days <span class="warn">(simulated placeholder data: live price history is unavailable)</span>`;
+  const src = String(s.source || 'exchange');
+  return `Growth of $100 over the last ${s.values.length} days · prices from ${esc(src[0].toUpperCase() + src.slice(1))}`;
+}
+// Re-render the trading page when history arrives, unless the user is typing in a field.
+function refreshHistoryUI() {
+  if (currentPath() !== '/trading' || modal === 'live') return;
+  const el = document.activeElement;
+  if (el && el.matches && el.matches('input, select')) { setTimeout(refreshHistoryUI, 800); return; }
+  renderTrading();
 }
 
 /* ============================================================
@@ -147,6 +208,7 @@ const setText = (id, txt) => { const el = document.getElementById(id); if (el) e
 
 const money = n => '$' + n.toFixed(2);
 const moneyC = c => money(c / 100);
+const usd = c => (c / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 const signedC = c => (c >= 0 ? '+' : '−') + money(Math.abs(c) / 100);
 const pct = (n, d = 1) => (n * 100).toFixed(d) + '%';
 const currentPath = () => location.hash.slice(1) || '/';
@@ -217,6 +279,7 @@ async function loadMarket() {
       state.trade.symbol = market.instruments[0].symbol;
       save();
     }
+    market.instruments.forEach(loadHistory);
     if (currentPath() === '/trading' && modal !== 'live') renderTrading();
   } finally { loadingMarket = false; }
 }
@@ -369,7 +432,9 @@ function renderTrading() {
   const orderC = cartTotalC();
   if (!orderC) { location.hash = '#/'; return; }
   ensureTradeDefaults();
+  market.instruments.forEach(loadHistory);
   const t = state.trade, c = selectedCoin(), list = coins(), mv = maxVol();
+  const s = series(c), st = s && s.stats;
   const minC = minInvestC(), maxC = maxInvestC(), f = market.fees;
   const capped = orderC > market.depositMax;
   const num = v => (Number.isFinite(v) ? v : '');
@@ -392,7 +457,7 @@ function renderTrading() {
               ${list.map(x => `
                 <button class="crypto-item ${x.symbol === c.symbol ? 'active' : ''}" data-action="select-crypto" data-id="${esc(x.symbol)}">
                   <span><strong>${esc(x.base)}</strong> <span class="muted small">${esc(x.name)}</span></span>
-                  <span class="tag ${volLevel(x)}">${volLevel(x)} vol</span>
+                  ${volTag(x, 'vol')}
                 </button>`).join('')}
             </div>
             <label class="field">Initial investment
@@ -414,26 +479,26 @@ function renderTrading() {
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center">
               <h2 style="margin:0">${esc(c.name)} (${esc(c.base)})</h2>
-              <span class="tag ${volLevel(c)}">${volLevel(c)} volatility</span>
+              ${volTag(c, 'volatility')}
             </div>
-            <div class="muted small" style="margin:4px 0 8px">Model performance on $100 over the last ${HISTORY_DAYS} days (simulated placeholder data)</div>
-            <canvas id="chart"></canvas>
+            <div class="muted small" style="margin:4px 0 8px">${chartCaption(s)}</div>
+            ${s ? '<canvas id="chart"></canvas>' : '<div class="chart-loading">Loading price history…</div>'}
 
             <div class="stats">
-              <div class="stat"><div class="label">Avg daily swing</div><div class="value">${pct(c.stats.vol)}</div></div>
-              <div class="stat"><div class="label">Max drawdown</div><div class="value">−${pct(c.stats.maxDD, 0)}</div></div>
-              <div class="stat"><div class="label">${HISTORY_DAYS}-day model return</div><div class="value">${c.stats.ret >= 0 ? '+' : ''}${pct(c.stats.ret, 0)}</div></div>
-              <div class="stat"><div class="label">Best day</div><div class="value">+${pct(c.stats.bestDay)}</div></div>
-              <div class="stat"><div class="label">Worst day</div><div class="value">${pct(c.stats.worstDay)}</div></div>
-              <div class="stat"><div class="label">Price data</div><div class="value">${c.data === 'replay' ? 'Recorded' : 'Live'}</div></div>
+              <div class="stat"><div class="label">Avg daily swing</div><div class="value">${st ? pct(st.vol) : '—'}</div></div>
+              <div class="stat"><div class="label">Max drawdown</div><div class="value">${st ? '−' + pct(st.maxDD, 0) : '—'}</div></div>
+              <div class="stat"><div class="label">${s ? s.values.length : HISTORY_DAYS}-day return</div><div class="value">${st ? (st.ret >= 0 ? '+' : '') + pct(st.ret, 0) : '—'}</div></div>
+              <div class="stat"><div class="label">Best day</div><div class="value">${st ? '+' + pct(st.bestDay) : '—'}</div></div>
+              <div class="stat"><div class="label">Worst day</div><div class="value">${st ? pct(st.worstDay) : '—'}</div></div>
+              <div class="stat"><div class="label">Latest price</div><div class="value">${s && s.latestCents ? usd(s.latestCents) : '—'}</div></div>
             </div>
 
             <strong class="small">Volatility vs. other cryptos</strong>
             ${list.map(x => `
               <div class="vol-row ${x.symbol === c.symbol ? 'active' : ''}">
                 <span>${esc(x.base)}</span>
-                <div class="vol-bar"><div style="width:${(x.stats.vol / mv) * 100}%"></div></div>
-                <span>${pct(x.stats.vol)}</span>
+                <div class="vol-bar"><div style="width:${volOf(x) === null ? 0 : (volOf(x) / mv) * 100}%"></div></div>
+                <span>${volOf(x) === null ? '—' : pct(volOf(x))}</span>
               </div>`).join('')}
 
             <strong class="small" style="display:block;margin-top:14px">Things to know</strong>
@@ -471,7 +536,7 @@ function renderTrading() {
       </div>
     </div>`;
 
-  drawChart($('#chart'), c.history);
+  if (s) drawChart($('#chart'), s.values);
   updateSummary();
 }
 
@@ -566,7 +631,7 @@ function drawChart(canvas, data) {
     ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
     ctx.fillText('$' + v.toFixed(0), 6, yy + 4);
   }
-  ctx.fillText('90d ago', pad.l, h - 6);
+  ctx.fillText(data.length + 'd ago', pad.l, h - 6);
   ctx.fillText('today', w - pad.r - 30, h - 6);
 
   if (min < 100 && max > 100) {
@@ -911,8 +976,8 @@ function route() {
 }
 window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); });
 window.addEventListener('resize', () => {
-  const canvas = $('#chart');
-  if (canvas) drawChart(canvas, selectedCoin().history);
+  const canvas = $('#chart'), s = series(selectedCoin());
+  if (canvas && s) drawChart(canvas, s.values);
 });
 
 route();

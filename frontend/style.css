@@ -115,6 +115,11 @@ h1, h2, h3 { margin: 0 0 12px; }
 .tag.low { background: #dcfce7; color: var(--good); }
 .tag.medium { background: #fef3c7; color: var(--warn); }
 .tag.high { background: #fee2e2; color: var(--bad); }
+.tag.pending { background: #eceef3; color: var(--muted); }
+.chart-loading {
+  height: 260px; border-radius: 10px; background: #f7f8fb;
+  display: grid; place-items: center; color: var(--muted); font-size: 14px;
+}
 
 label.field, div.field { display: block; margin-bottom: 16px; font-weight: 600; font-size: 14px; }
 .hint { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 3px; }
