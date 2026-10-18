@@ -234,7 +234,7 @@ export async function buildApp(options?: {
     if (!/^[\w-]+\.jpg$/.test(file)) return reply.code(404).send({ error: { code: 'not_found', message: 'Not found.' } })
     const image = await readFile(join(root, 'frontend', 'img', file)).catch(() => null)
     if (!image) return reply.code(404).send({ error: { code: 'not_found', message: 'Not found.' } })
-    return reply.type('image/jpeg').header('Cache-Control', 'public, max-age=86400').send(image)
+    return reply.type('image/jpeg').header('Cache-Control', 'no-cache').send(image)
   })
 
   // Which model the server starts for a BTC session. The page lists the choices and sets one before it opens a session.
