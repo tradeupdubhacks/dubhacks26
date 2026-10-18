@@ -6,12 +6,17 @@ import { LocalSolana } from './chain.js'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const port = Number(process.env.PORT ?? 3000)
 const host = process.env.HOST ?? '0.0.0.0'
-const chain = new LocalSolana(process.env.SOLANA_RPC ?? 'http://127.0.0.1:8899', join(root, '.local-solana'))
 
-try {
-  await chain.start()
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error)
+const chain = process.env.NO_CHAIN
+  ? null
+  : new LocalSolana(process.env.SOLANA_RPC ?? 'http://127.0.0.1:8899', join(root, '.local-solana'))
+
+if (chain) {
+  try {
+    await chain.start()
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error)
+  }
 }
 
 const { app } = await buildApp({ logger: true, chain })
