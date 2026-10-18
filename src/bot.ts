@@ -115,7 +115,7 @@ export class BotRunner implements BotControl {
     const log = this.options.log ?? (() => {})
     const child = spawn(this.options.command, model.args, {
       cwd: this.options.cwd,
-      env: { ...process.env, ...this.options.env, ...model.env, MODEL_API_URL: this.options.url, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, ...this.options.env, ...model.env, MODEL_API_URL: this.options.url, PYTHONUNBUFFERED: '1', MODEL_BOT_CHILD: '1' },
       stdio: ['ignore', 'inherit', 'inherit'],
     })
     this.child = child

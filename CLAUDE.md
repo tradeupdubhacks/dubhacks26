@@ -29,7 +29,7 @@ python -m model.tape_grid && python -m model.train_session && python -m model.ev
 
 Some `tests/test_api_client.py` cases skip unless a server is on `:3000`. The server tests use `buildApp()` directly and need no network. The validator is optional: without `solana-test-validator` (or `SOLANA_TEST_VALIDATOR=/path`) the server still starts, training works, and `POST /v1/session` returns 503.
 
-Environment switches: `FEE_MODEL=solana|exchange` (**default `solana`**: no exchange fee, about 0.1 cent network fee per fill; `exchange` charges 2/5 bps), `USE_CHAIN=1` (start the local Solana validator; off by default), `BOT_STRATEGY`, `MODEL_BOT=off` (server does not spawn the bot), `MODEL_BOT_KIND` (default model, see below), `MODEL_BOT_PYTHON`, `MODEL_PROFILE=idle|active` (default `active`), `MODEL_API_URL` (bot's server address), `SOLANA_RPC`.
+Environment switches: `FEE_MODEL=solana|exchange` (**default `solana`**: no exchange fee, about 0.1 cent network fee per fill; `exchange` charges 2/5 bps), `USE_CHAIN=1` (start the local Solana validator; off by default), `BOT_STRATEGY`, `MODEL_BOT=off` (server does not spawn the bot), `MODEL_BOT_KIND` (default model, see below), `MODEL_BOT_PYTHON`, `MODEL_PROFILE=idle|active` (default `active`), `TRANSFORMER_ENTRY` (transformer entry confidence 0..1, default 0.40), `MODEL_API_URL` (bot's server address), `SOLANA_RPC`.
 
 ## Architecture
 

@@ -93,3 +93,28 @@ def test_live_transformer_mode_enters_on_a_confident_score(monkeypatch):
     assert len(places) == 1                                                       # one entry, not one per snapshot (cooldown + in-flight view)
     order = places[0]["order"]
     assert order["type"] == "ioc" and order["side"] == "buy" and 1 <= order["size"] <= 10
+
+
+def test_history_bars_fill_the_window_so_the_bot_can_score_at_once(monkeypatch):
+    bid, ask, bsz, asz = book(700)
+    FakeClient.bars = [{"ts": (i - 601) * TICK_MS, "bid": int(bid[i]), "ask": int(ask[i]), "bidSize": int(bsz[i]), "askSize": int(asz[i])} for i in range(601)]
+    seen = {}
+
+    class Probe:
+        def score(self, stream):
+            seen.setdefault("ready_on_first_score", stream.arrays() is not None)
+            return 0.95
+
+    messages = [json.dumps({"type": "snapshot", "observation": observation(0, bid, ask, bsz, asz)})]
+    socket = FakeSocket(messages)
+    monkeypatch.setattr(live, "ModelClient", FakeClient)
+    monkeypatch.setattr(live, "DECISION_INTERVAL", 0.0)
+    monkeypatch.setattr(live.websockets, "connect", FakeConnect(socket), raising=False)
+    monkeypatch.setattr(live, "load_transformer_model", lambda: (Probe(), SessionParams(take_profit_bps=0, stop_bps=25, max_hold_steps=25, cooldown_steps=5, threshold=0.5, vol_gate=0.0, sizing_bps=1.0)))
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(live.session("http://localhost:3000", "transformer"))
+    finally:
+        FakeClient.bars = []
+    assert seen["ready_on_first_score"] is True                                   # no 31 s warm-up
+    assert [m for m in socket.sent if m.get("op") == "place"], "should enter on the very first snapshot"

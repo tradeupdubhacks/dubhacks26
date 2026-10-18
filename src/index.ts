@@ -44,4 +44,12 @@ const bot = process.env.MODEL_BOT === 'off'
 
 const { app } = await buildApp({ logger: true, chain, feeModel, bot })
 console.log(`fee model: ${feeModel}`)
+// Stop the bot with the server on Ctrl-C or a plain kill; otherwise it would keep running with no server.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  process.on(signal, () => {
+    bot?.stop()
+    process.exit(0)
+  })
+}
+process.on('exit', () => bot?.stop())
 await app.listen({ port, host })

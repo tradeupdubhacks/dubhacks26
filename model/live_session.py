@@ -70,19 +70,47 @@ def load_session_model(path: Path = SESSION_ARTIFACT, profile: str | None = None
     return score, params
 
 
+# Entry confidence = |predicted 5 s move| / scale, from 0 to 1. 0.40 trades from the first second and earns the most on the validation day
+# (2023-12-15, never trained on): about +16 % over the stricter 0.72 that the model's "top 10 % of ticks" rule gives, and +48 % on the replay day.
+# Lower is faster and busier but each trade is weaker; above ~0.6 it can sit idle for minutes. See model/TRANSFORMER.md. Override: TRANSFORMER_ENTRY.
+DEFAULT_ENTRY = 0.40
+
+
 def load_transformer_model():
     """The tick transformer and its short-hold policy: enter on a confident 5 s forecast, flatten after about 5 s.
 
-    Entry confidence is |prediction| / scale, so the threshold is the one that selected the top 10 % of ticks on the validation day.
     There is no take-profit; the trade ends at the hold limit (25 ticks = 5 s) or a 25 bps stop. Sizing aims for the largest position the
     rails allow, so `sizing_bps` is just above the exchange fees (0 when the server runs FEE_MODEL=solana)."""
     scorer = TransformerScorer()
+    entry = float(os.environ.get("TRANSFORMER_ENTRY", DEFAULT_ENTRY))
+    if not 0.0 <= entry <= 1.0:
+        raise SystemExit(f"TRANSFORMER_ENTRY must be between 0 and 1, got {entry}.")
     params = SessionParams(
-        take_profit_bps=0, stop_bps=25, max_hold_steps=25, cooldown_steps=5, threshold=scorer.entry_threshold,
+        take_profit_bps=0, stop_bps=25, max_hold_steps=25, cooldown_steps=5, threshold=entry,
         vol_gate=0.0, sizing_bps=TAKER_BPS + MAKER_BPS + 1.0,
     )
     print(f"transformer loaded (entry confidence {params.threshold:.2f}, hold {params.max_hold_steps * 0.2:.0f}s, stop {params.stop_bps:g} bps)")
     return scorer, params
+
+
+def orphaned() -> bool:
+    """True when the server that spawned this bot (MODEL_BOT_CHILD=1) has died and init has adopted the process."""
+    return os.environ.get("MODEL_BOT_CHILD") == "1" and os.getppid() == 1
+
+
+def prime(stream: TickStream, client: ModelClient) -> int:
+    """Fill the transformer's 30 s window from GET /v1/bars (the server's recent 200 ms bars; at a session's open that is the 2-minute
+    pre-roll), so it can trade at once instead of after 31 s. Returns the number of bars loaded; 0 when the endpoint is unavailable."""
+    try:
+        bars = client.request("GET", "/v1/bars?limit=601").get("bars") or []
+    except Exception as error:
+        print(f"could not load history ({error}); warming up from live snapshots instead")
+        return 0
+    stream.snaps.clear()
+    for bar in bars:
+        stream.update({"ts": bar["ts"], "bids": [{"price": bar["bid"], "size": bar["bidSize"]}],
+                       "asks": [{"price": bar["ask"], "size": bar["askSize"]}]})
+    return len(bars)
 
 
 async def session(base_url: str, policy: str = "session") -> None:
@@ -103,6 +131,7 @@ async def session(base_url: str, policy: str = "session") -> None:
     last_decision = 0.0
     waiting = False
     halted = False
+    primed = False
     print(f"connected to {client.ws_url()}, policy threshold {params.threshold:.2f}")
     async with websockets.connect(client.ws_url(), max_queue=None) as socket:
         while True:
@@ -112,6 +141,10 @@ async def session(base_url: str, policy: str = "session") -> None:
                 # Quiet stream: no live session is open. Keep the socket alive.
                 await socket.send(json.dumps({"op": "ping"}))
                 continue
+            except websockets.ConnectionClosed:
+                if orphaned():
+                    raise SystemExit("the server that started this bot is gone")
+                raise
             message = json.loads(raw)
             kind = message.get("type")
             if kind == "events":
@@ -126,6 +159,7 @@ async def session(base_url: str, policy: str = "session") -> None:
             if observation is None:
                 continue
             if observation.get("stakeCents") is None and not observation.get("halted"):
+                primed = False                        # the next session needs its own history
                 if not waiting:
                     print("waiting for a live session. Open one from the page.")
                     waiting = True
@@ -141,6 +175,10 @@ async def session(base_url: str, policy: str = "session") -> None:
             limits = limits_for(symbol, catalog)
             if limits is None or symbol != "BTC-USDT":
                 continue                              # both session models are trained on BTC top of book only
+            if policy == "transformer" and not primed:
+                primed = True
+                loaded = prime(stream, client)
+                print(f"loaded {loaded} history bars, ready to trade at once" if loaded else "no history, warming up")
             view = inflight.view(observation, now)
             features = session_features(view)
             if policy == "transformer":
@@ -172,6 +210,8 @@ async def run(base_url: str = "http://127.0.0.1:3000", policy: str = "session") 
         except SystemExit:
             raise
         except Exception as error:
+            if orphaned():
+                raise SystemExit("the server that started this bot is gone")
             print(f"stream closed ({error!r}). Reconnecting.")
             await asyncio.sleep(1)
 

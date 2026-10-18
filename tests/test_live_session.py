@@ -61,6 +61,9 @@ class FakeClient:
     def instruments(self):
         return {"instruments": [{"symbol": "BTC-USDT", "priceTickCents": 10, "maxOrderLots": 10, "maxPositionLots": 10}]}
 
+    def request(self, method, path):
+        return {"bars": getattr(FakeClient, "bars", [])}
+
     def ws_url(self):
         return "ws://localhost:3000/v1/stream"
 
@@ -104,3 +107,16 @@ def test_session_profiles_idle_uses_the_artifact_and_active_trades_more(monkeypa
     monkeypatch.setenv("MODEL_PROFILE", "nonsense")
     with pytest.raises(SystemExit):
         live.load_session_model()
+
+
+def test_transformer_entry_confidence_defaults_to_0_40_and_can_be_overridden(monkeypatch):
+    class Stub:
+        entry_threshold = 0.72
+    monkeypatch.setattr(live, "TransformerScorer", lambda: Stub())
+    monkeypatch.delenv("TRANSFORMER_ENTRY", raising=False)
+    assert live.load_transformer_model()[1].threshold == 0.40
+    monkeypatch.setenv("TRANSFORMER_ENTRY", "0.55")
+    assert live.load_transformer_model()[1].threshold == 0.55
+    monkeypatch.setenv("TRANSFORMER_ENTRY", "7")
+    with pytest.raises(SystemExit):
+        live.load_transformer_model()

@@ -15,7 +15,11 @@ python .venv/bin/python hft/research/22_transformer_policy_eval.py   # policy on
   `tests/test_transformer_signal.py` checks that the live stream gives the same numbers as the training grid.
 - **Output:** predicted mid move in bps over the next 25 ticks (5 s). `score = 0.5 + 0.5 * clip(pred / scale, -1, 1)` feeds `decide_session`.
   `scale` (0.80 bps) and the entry confidence (0.72, the validation day's top 10 % of ticks) are stored in the artifact.
-- **Warm-up:** no opinion (score 0.5) until 155 ticks (31 s of market time) have been seen.
+- **Warm-up:** the model needs 155 ticks (31 s) of history. In a live session the bot loads it at once from `GET /v1/bars` (the server's 2-minute
+  pre-roll of the tape, `live_session.prime`), so it can act from the first second. Without that endpoint it warms up from live snapshots.
+- **When it first trades:** at entry confidence 0.40 it trades from the first second (first fill 0 to 12 s live). It used to wait for confidence 0.72 (the
+  top ~6 % of ticks), and the replayed day is quiet right after the 2-minute pre-roll, so the first fill came at about 136 s. The first strong signal, at session 6 s,
+  is a 3 bp drop in 50 ms that an IOC with a 2-tick cap cannot catch.
 
 ## Model and training
 2 pre-norm encoder layers, width 64, 4 heads, learned positions, mean + last-token pooling, ~100 k parameters. Huber loss on the 5 s move clipped to +-15 bps,
@@ -23,10 +27,11 @@ python .venv/bin/python hft/research/22_transformer_policy_eval.py   # policy on
 test: 2026-10-01, the day the server replays, which the model never saw.
 
 ## Policy
-Enter (IOC at the touch +- 2 ticks) when confidence >= 0.72, sized to the largest position the floor allows; **no take-profit**; flatten after
+Enter (IOC at the touch +- 2 ticks) when confidence >= 0.40 (`TRANSFORMER_ENTRY`, default in `live_session.DEFAULT_ENTRY`), sized to the largest position the floor allows; **no take-profit**; flatten after
 25 ticks (5 s) or at a 25 bps stop; 1 s cooldown. It is the short hold that matches the 5 s forecast; the small network's 10-minute hold does not.
 
 ## Results on the replay day (out of sample), through `backtest.StepEnv`
+These figures were measured at entry confidence 0.72, before the default moved to 0.40 (see the last section for the 0.40 numbers).
 | | trades | price P&L | fees | stake change on $100 |
 | --- | --- | --- | --- | --- |
 | **fees off (platform default)** | 5,042 (210/h) | +$229.80 | $0 | **+$229.80** |
@@ -45,3 +50,19 @@ Held-out rank correlation 0.22, gross edge 0.63 bps at the top 10 % of calls (0.
 - One replay day for the end-to-end result. On the 4 held-out Binance days the edge was positive on all four (0.39 to 0.70 bps at the top 10 %), so the
   sign is stable, but the dollar figure above is one day.
 - The live session replays that one day at wall-clock speed, so the page shows its first minutes and hours, not a different market.
+
+## Entry confidence: speed and profit (`hft/research/24_transformer_start_speed.py`, `25_threshold_validation.py`)
+Full-day P&L on a $20 stake sized to a $16 floor (about 18 lots), Solana fee only, session started as the live server starts it. Chosen on the
+validation day (never trained on), not on the replay day.
+
+| Entry confidence | Validation day: first fill / trades per hour / P&L | Replay day: first fill / trades per hour / P&L |
+| --- | --- | --- |
+| 0.72 (old) | 0.6 s / 301 / +$146.64 | 134.6 s / 209 / +$220.47 |
+| 0.60 | 0.0 s / 355 / +$171.24 | 108.0 s / 282 / +$267.29 |
+| 0.50 | 0.0 s / 396 / +$167.77 | 11.8 s / 340 / +$308.60 |
+| **0.40 (default)** | 0.0 s / 438 / **+$170.46** | 0.4 s / 393 / +$325.45 |
+| 0.30 | 0.0 s / 482 / +$154.30 | 0.0 s / 445 / +$335.62 |
+| 0.10 | 0.0 s / 559 / +$119.74 | 0.0 s / 550 / +$255.77 |
+
+Lower is faster and busier; below about 0.3 each trade is too weak and profit falls. A wider order cap (up to 20 ticks) did not change the first fill.
+More trades also means more fees: this table assumes the Solana fee only. Under `FEE_MODEL=exchange` the busier setting loses faster.
