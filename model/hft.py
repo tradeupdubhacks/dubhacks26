@@ -24,6 +24,8 @@ the server's 50ms latency; real queues and exchange fees would cut into it.
 from __future__ import annotations
 
 import asyncio
+import builtins
+import functools
 import json
 import os
 import time
@@ -172,11 +174,15 @@ class HftTrader:
         return order(side, min(abs(position), limits.max_order_lots), "exit_turned" if turned else "exit_timeout")
 
 
-async def session(base_url: str) -> None:
+async def session(base_url: str, session_id: str | None = None) -> None:
+    """Trade one session. With `session_id`, only that session, returning once it halts.
+    Without one, the server's latest session, waiting for the next when it ends."""
+    # Tag every line with the session, since one bot now trades several at once.
+    print = functools.partial(builtins.print, f"[{session_id}]", flush=True) if session_id else builtins.print  # noqa: A001
     # Shared plumbing from the model bot. Imported here so the two modules do not import each other at load.
     from model.live import DECISION_INTERVAL, IDLE_PING, InFlight, _send, limits_for
 
-    client = ModelClient(base_url)
+    client = ModelClient(base_url, session_id=session_id)
     client.health()
     instruments = client.instruments()
     catalog = {item["symbol"]: item for item in instruments["instruments"]}
@@ -258,6 +264,8 @@ async def session(base_url: str) -> None:
                 if not halted:
                     print(f"session halted ({observation.get('haltReason')}), not sending orders")
                     halted = True
+                if session_id:
+                    return
                 continue
             halted = False
             idle = not view.get("positionLots") and not view.get("openOrders")

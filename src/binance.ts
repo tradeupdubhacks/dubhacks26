@@ -16,6 +16,7 @@ export class BinanceBtcFeed implements LiveBtcSource {
   private book: Book | null = null
   private sinceAdvance: Trade | null = null
   private sinceSample: Trade | null = null
+  private views = new Set<FeedView>()
   private samples: TopOfBook[] = []
   private lastMessageMs = 0
   private sampler: ReturnType<typeof setInterval> | null = null
@@ -74,6 +75,23 @@ export class BinanceBtcFeed implements LiveBtcSource {
     return this.samples.slice(-count)
   }
 
+  /** One session's window on the feed: the shared book and history, its own trade cursor. */
+  view(): LiveBtcSource {
+    const view = new FeedView(this)
+    this.views.add(view)
+    return view
+  }
+
+  /** Exposed for FeedView. */
+  currentBook(): Book | null {
+    return this.book
+  }
+
+  /** Exposed for FeedView. */
+  forget(view: FeedView): void {
+    this.views.delete(view)
+  }
+
   /** Exposed for tests: apply one raw combined-stream message. */
   receive(raw: string): void {
     let message: { data?: Record<string, unknown> }
@@ -98,6 +116,7 @@ export class BinanceBtcFeed implements LiveBtcSource {
       const trade: Trade = { price, size, side: data.m ? 'sell' : 'buy' }
       this.sinceAdvance = trade
       this.sinceSample = trade
+      for (const view of this.views) view.pending = trade
       this.lastMessageMs = Date.now()
     }
   }
@@ -125,5 +144,47 @@ export class BinanceBtcFeed implements LiveBtcSource {
       if (this.socket === socket) this.socket = null
       if (!this.stopped) this.retry = setTimeout(() => this.connect(), 2_000)
     }
+  }
+}
+
+/** A session's view of a shared BinanceBtcFeed. Trades are delivered to every view. */
+class FeedView implements LiveBtcSource {
+  pending: Trade | null = null
+
+  constructor(private readonly feed: BinanceBtcFeed) {}
+
+  get available(): boolean {
+    return this.feed.available
+  }
+
+  get stale(): boolean {
+    return this.feed.stale
+  }
+
+  async open(): Promise<TopOfBook> {
+    const book = this.feed.currentBook()
+    if (!book) throw new Error('Live BTC prices have not arrived yet')
+    this.pending = null
+    return { ...book, trade: null }
+  }
+
+  async advance(_marketMs: number): Promise<TopOfBook> {
+    const book = this.feed.currentBook()
+    if (!book) throw new Error('Live BTC prices have not arrived yet')
+    const trade = this.pending
+    this.pending = null
+    return { ...book, trade }
+  }
+
+  rebase(_marketMs: number): void {}
+
+  async close(): Promise<void> {}
+
+  history(count: number): TopOfBook[] {
+    return this.feed.history(count)
+  }
+
+  release(): void {
+    this.feed.forget(this)
   }
 }

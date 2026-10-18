@@ -25,8 +25,25 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 export interface App {
   app: FastifyInstance
-  market: Market
+  /** The latest live session's market, or the training market when there is none. */
+  readonly market: Market
   close: () => Promise<void>
+}
+
+/** At most this many sessions trade at once. Each one borrows the house fund's leverage. */
+export const MAX_SESSIONS = 20
+/** A halted session stays readable this long, so its page can show the result, then it is dropped. */
+const HALTED_TTL_MS = 10 * 60_000
+
+/** One market and the sockets watching it. Every live session gets its own. */
+interface Slot {
+  id: string
+  market: Market
+  watchers: Set<Socket>
+  streams: Set<Socket>
+  sawHalt: boolean
+  haltedAt: number | null
+  release?: () => void
 }
 
 export async function buildApp(options?: {
@@ -38,18 +55,35 @@ export async function buildApp(options?: {
   feeModel?: FeeModel
   btcFeed?: LiveBtcSource | null
 }): Promise<App> {
-  const market = new Market(
-    options?.tapeDir ?? join(root, 'hft', 'data', 'raw'),
-    options?.chain ?? null,
-    options?.feeModel ?? 'exchange',
-    options?.btcFeed ?? null,
-  )
+  const tapeDir = options?.tapeDir ?? join(root, 'hft', 'data', 'raw')
+  const feeModel = options?.feeModel ?? 'exchange'
+  const newSlot = (id: string, live: boolean): Slot => {
+    const feed = live && options?.btcFeed ? (options.btcFeed.view?.() ?? options.btcFeed) : null
+    return {
+      id,
+      market: new Market(tapeDir, options?.chain ?? null, feeModel, feed),
+      watchers: new Set(),
+      streams: new Set(),
+      sawHalt: false,
+      haltedAt: null,
+      release: feed?.release ? () => feed.release?.() : undefined,
+    }
+  }
+  // Training (reset/step) has its own market. Live sessions never share it.
+  const training = newSlot('training', false)
+  const slots = new Map<string, Slot>()
+  let current: Slot | null = null
+  let sessionSeq = 0
   const app = Fastify({ logger: options?.logger ?? false })
-  const watchers = new Set<Socket>()
-  const streams = new Set<Socket>()
   let clock: ReturnType<typeof setInterval> | undefined
   let feed: ReturnType<typeof setInterval> | undefined
-  let sawHalt = false
+
+  const running = () => [...slots.values()].filter((slot) => slot.market.liveOpen && !isHalted(slot))
+
+  function isHalted(slot: Slot): boolean {
+    const view = slot.market.sessionView()
+    return 'status' in view && view.status === 'halted'
+  }
 
   function send(socket: Socket, payload: string): void {
     if (socket.readyState !== socket.OPEN) return
@@ -60,55 +94,82 @@ export async function buildApp(options?: {
     socket.send(payload)
   }
 
-  function publish(): void {
-    const session = market.sessionView()
+  function publish(slot: Slot): void {
+    const session = slot.market.sessionView()
     const halted = 'status' in session && session.status === 'halted'
-    const type = halted && !sawHalt ? 'halt' : 'snapshot'
-    sawHalt = halted
-    if (!('status' in session) || session.status === 'idle') sawHalt = false
+    const type = halted && !slot.sawHalt ? 'halt' : 'snapshot'
+    if (halted && slot.haltedAt === null) slot.haltedAt = Date.now()
+    slot.sawHalt = halted
+    if (!('status' in session) || session.status === 'idle') slot.sawHalt = false
     const watchPayload = JSON.stringify({ type, session })
-    for (const socket of watchers) send(socket, watchPayload)
-    if (market.liveOpen) {
-      const streamPayload = JSON.stringify({ type: 'snapshot', observation: market.observation() })
-      for (const socket of streams) send(socket, streamPayload)
+    for (const socket of slot.watchers) send(socket, watchPayload)
+    if (slot.market.liveOpen) {
+      const streamPayload = JSON.stringify({ type: 'snapshot', observation: slot.market.observation() })
+      for (const socket of slot.streams) send(socket, streamPayload)
     }
   }
 
-  async function pullPrice(): Promise<void> {
+  function sendEvents(slot: Slot, events: unknown[], observation: unknown): void {
+    if (events.length === 0) return
+    const payload = JSON.stringify({ type: 'events', events, observation })
+    for (const socket of slot.streams) send(socket, payload)
+  }
+
+  /** `sessionId` picks a session. Without one, the latest session, else the training market. */
+  function resolve(sessionId: string | undefined): Slot | Failure {
+    if (sessionId === undefined || sessionId === '') return current ?? training
+    const slot = slots.get(sessionId)
+    if (!slot) return { ok: false, status: 404, code: 'unknown_session', message: `There is no session ${sessionId}.` }
+    return slot
+  }
+
+  function sessionIdOf(request: { query: unknown; body?: unknown }): string | undefined {
+    const query = isRecord(request.query) ? request.query : {}
+    const fromQuery = stringQuery(query.sessionId)
+    if (fromQuery !== undefined) return fromQuery
+    const body = isRecord(request.body) ? request.body : {}
+    return typeof body.sessionId === 'string' ? body.sessionId : undefined
+  }
+
+  async function pullPrices(): Promise<void> {
+    const needing = [...slots.values()].filter((slot) => slot.market.needsFeed)
+    if (needing.length === 0) return
     const price = await fetchSolMid()
-    if (!market.needsFeed) return
-    const events = price ? await market.setReferenceMid(price.cents, price.source) : []
-    if (!price) await market.markStale()
-    if (events.length > 0) {
-      const payload = JSON.stringify({ type: 'events', events, observation: market.observation() })
-      for (const socket of streams) send(socket, payload)
+    for (const slot of needing) {
+      const events = price ? await slot.market.setReferenceMid(price.cents, price.source) : []
+      if (!price) await slot.market.markStale()
+      sendEvents(slot, events, slot.market.observation())
+      publish(slot)
     }
-    publish()
   }
 
-  function syncLoops(): void {
-    if (clock) clearInterval(clock)
-    if (feed) clearInterval(feed)
-    clock = undefined
-    feed = undefined
-    if (options?.clock === false) return
-    if (market.liveOpen) {
-      clock = setInterval(() => {
-        void market.tick(200).then((events) => {
-          if (events.length > 0) {
-            const payload = JSON.stringify({ type: 'events', events, observation: market.observation() })
-            for (const socket of streams) send(socket, payload)
-          }
-          publish()
+  function startLoops(): void {
+    if (options?.clock === false || clock) return
+    clock = setInterval(() => {
+      const now = Date.now()
+      for (const slot of slots.values()) {
+        if (slot.haltedAt !== null && now - slot.haltedAt > HALTED_TTL_MS) {
+          drop(slot)
+          continue
+        }
+        if (!slot.market.liveOpen) continue
+        void slot.market.tick(200).then((events) => {
+          sendEvents(slot, events, slot.market.observation())
+          publish(slot)
         })
-      }, 200)
-    }
-    if (market.needsFeed) {
-      feed = setInterval(() => {
-        void pullPrice()
-      }, 1_000)
-      void pullPrice()
-    }
+      }
+    }, 200)
+    feed = setInterval(() => {
+      void pullPrices()
+    }, 1_000)
+  }
+
+  function drop(slot: Slot): void {
+    slots.delete(slot.id)
+    if (current === slot) current = null
+    for (const socket of [...slot.watchers, ...slot.streams]) socket.close()
+    slot.release?.()
+    void slot.market.close()
   }
 
   app.removeAllContentTypeParsers()
@@ -137,7 +198,6 @@ export async function buildApp(options?: {
     app.log.error(error)
     return reply.code(500).send({ error: { code: 'internal', message: 'Internal error.' } })
   })
-
   app.addHook('onRequest', async (request, reply) => {
   reply.header('Access-Control-Allow-Origin', '*')
   reply.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
@@ -155,9 +215,10 @@ export async function buildApp(options?: {
     ok: true,
     mode: 'localhost',
     execution: options?.chain ? 'solana' : 'fake',
+    sessions: { running: running().length, max: MAX_SESSIONS },
     ...(options?.chain ? { chain: options.chain.snapshot() } : {}),
   }))
-  app.get('/v1/instruments', async () => instrumentsBody(market.feeView(), market.btcFeedAttached))
+  app.get('/v1/instruments', async () => instrumentsBody(training.market.feeView(), Boolean(options?.btcFeed)))
   app.get('/v1/history', async (request, reply) => {
     const query = isRecord(request.query) ? request.query : {}
     const result = await loadHistory(
@@ -171,17 +232,33 @@ export async function buildApp(options?: {
     return reply.code(result.status).send(result.body)
   })
   app.get('/v1/schema', async () => schemas)
+
+  // Every live session, so a bot can find the ones it should trade.
+  app.get('/v1/sessions', async () => ({
+    max: MAX_SESSIONS,
+    sessions: [...slots.values()].map((slot) => {
+      const view = slot.market.sessionView()
+      return 'sessionId' in view
+        ? { sessionId: view.sessionId, status: view.status, strategy: view.strategy, instrument: view.instrument, startedAt: view.startedAt }
+        : { sessionId: slot.id, status: 'idle' }
+    }),
+  }))
+
   app.get('/v1/bars', async (request, reply) => {
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) return sendFailure(reply, slot)
     const query = isRecord(request.query) ? request.query : {}
     const raw = stringQuery(query.limit)
     const limit = raw === undefined || raw === '' ? 601 : Number(raw)
     if (!Number.isInteger(limit) || limit < 1 || limit > 601) {
       return reply.code(400).send({ error: { code: 'bad_limit', message: 'limit must be an integer from 1 to 601.' } })
     }
-    return market.barsView(limit)
+    return slot.market.barsView(limit)
   })
-  app.get('/v1/book', async () => {
-    const view = market.observation()
+  app.get('/v1/book', async (request, reply) => {
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) return sendFailure(reply, slot)
+    const view = slot.market.observation()
     return {
       market: view.market,
       ts: view.ts,
@@ -192,74 +269,124 @@ export async function buildApp(options?: {
       lastTrade: view.lastTrade,
     }
   })
-  app.get('/v1/account', async () => market.observation())
-  app.get('/v1/session', async () => market.sessionView())
+  app.get('/v1/account', async (request, reply) => {
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) return sendFailure(reply, slot)
+    return slot.market.observation()
+  })
+  app.get('/v1/session', async (request, reply) => {
+    const id = sessionIdOf(request)
+    if (id === undefined || id === '') return current ? current.market.sessionView() : { status: 'idle' }
+    const slot = resolve(id)
+    if ('ok' in slot) return sendFailure(reply, slot)
+    return slot.market.sessionView()
+  })
 
   app.post('/v1/session', async (request, reply) => {
-    const result = await market.openSession(bodyOf(request.body))
-    if (!result.ok) return sendFailure(reply, result)
-    syncLoops()
-    publish()
+    if (running().length >= MAX_SESSIONS) {
+      return sendFailure(reply, {
+        ok: false,
+        status: 409,
+        code: 'too_many_sessions',
+        message: `${MAX_SESSIONS} sessions are already trading. Try again when one ends.`,
+      })
+    }
+    const id = `sess_${++sessionSeq}`
+    const slot = newSlot(id, true)
+    const result = await slot.market.openSession(bodyOf(request.body), id)
+    if (!result.ok) {
+      slot.release?.()
+      void slot.market.close()
+      return sendFailure(reply, result)
+    }
+    slots.set(id, slot)
+    current = slot
+    startLoops()
+    publish(slot)
     return reply.code(201).send(result.session)
   })
 
   app.post('/v1/stop', async (request, reply) => {
-    const result = await market.stop()
+    const id = sessionIdOf(request)
+    const slot = id === undefined || id === '' ? current : slots.get(id)
+    if (!slot) {
+      return sendFailure(reply, { ok: false, status: 404, code: 'no_session', message: 'There is no session to stop.' })
+    }
+    const result = await slot.market.stop()
     if (!result.ok) return sendFailure(reply, result)
-    publish()
+    publish(slot)
     return result.session
   })
 
   app.post('/v1/reset', async (request, reply) => {
-    const result = await market.reset(bodyOf(request.body))
+    if (running().length > 0) {
+      return sendFailure(reply, { ok: false, status: 409, code: 'session_open', message: 'Reset is refused while a live session is running.' })
+    }
+    const result = await training.market.reset(bodyOf(request.body))
     if (!result.ok) return sendFailure(reply, result)
-    syncLoops()
+    current = null
     return { observation: result.observation, done: result.done }
   })
 
   app.post('/v1/step', async (request, reply) => {
-    const result = await market.step(bodyOf(request.body))
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) return sendFailure(reply, slot)
+    const body = bodyOf(request.body)
+    delete body.sessionId
+    const result = await slot.market.step(body)
     if (!result.ok) return sendFailure(reply, result)
-    publish()
-    const payload = JSON.stringify({ type: 'events', events: result.events, observation: result.observation })
-    for (const socket of streams) send(socket, payload)
+    publish(slot)
+    sendEvents(slot, result.events, result.observation)
     return { observation: result.observation, reward: result.reward, done: result.done, events: result.events }
   })
 
   app.post('/v1/orders', async (request, reply) => {
-    const result = await market.place(bodyOf(request.body))
+    const slot = resolve(sessionIdOf({ query: request.query }))
+    if ('ok' in slot) return sendFailure(reply, slot)
+    const result = await slot.market.place(bodyOf(request.body))
     if (!result.ok) return sendFailure(reply, result)
-    publish()
+    publish(slot)
     return { events: result.events, observation: result.observation }
   })
 
   app.delete('/v1/orders/:clientOrderId', async (request, reply) => {
+    const slot = resolve(sessionIdOf({ query: request.query }))
+    if ('ok' in slot) return sendFailure(reply, slot)
     const { clientOrderId } = request.params as { clientOrderId: string }
-    const result = await market.cancel(clientOrderId)
+    const result = await slot.market.cancel(clientOrderId)
     if (!result.ok) return sendFailure(reply, result)
-    publish()
+    publish(slot)
     return { events: result.events, observation: result.observation }
   })
 
   app.post('/v1/orders/cancel-all', async (request, reply) => {
-    const result = await market.cancelAll()
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) return sendFailure(reply, slot)
+    const result = await slot.market.cancelAll()
     if (!result.ok) return sendFailure(reply, result)
-    publish()
+    publish(slot)
     return { events: result.events, canceled: result.canceled, observation: result.observation }
   })
 
   app.post('/v1/flatten', async (request, reply) => {
-    const result = await market.flatten()
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) return sendFailure(reply, slot)
+    const result = await slot.market.flatten()
     if (!result.ok) return sendFailure(reply, result)
-    publish()
-    const payload = JSON.stringify({ type: 'events', events: result.events, observation: result.observation })
-    for (const socket of streams) send(socket, payload)
+    publish(slot)
+    sendEvents(slot, result.events, result.observation)
     return { events: result.events, observation: result.observation }
   })
 
-  app.get('/v1/watch', { websocket: true }, (socket: Socket) => {
-    watchers.add(socket)
-    send(socket, JSON.stringify({ type: 'snapshot', session: market.sessionView() }))
+  app.get('/v1/watch', { websocket: true }, (socket: Socket, request) => {
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) {
+      send(socket, JSON.stringify({ type: 'error', error: { code: slot.code, message: slot.message } }))
+      socket.close()
+      return
+    }
+    slot.watchers.add(socket)
+    send(socket, JSON.stringify({ type: 'snapshot', session: slot.market.sessionView() }))
     socket.on('message', (raw: Buffer) => {
       const message = parseMessage(raw)
       if (!message || message.op !== 'ping' || Object.keys(message).length !== 1) {
@@ -277,19 +404,26 @@ export async function buildApp(options?: {
       }
       send(socket, JSON.stringify({ type: 'pong' }))
     })
-    socket.on('close', () => watchers.delete(socket))
+    socket.on('close', () => slot.watchers.delete(socket))
   })
 
-  app.get('/v1/stream', { websocket: true }, (socket: Socket) => {
-    streams.add(socket)
-    send(socket, JSON.stringify({ type: 'snapshot', observation: market.observation() }))
+  app.get('/v1/stream', { websocket: true }, (socket: Socket, request) => {
+    const slot = resolve(sessionIdOf(request))
+    if ('ok' in slot) {
+      send(socket, JSON.stringify({ type: 'error', error: { code: slot.code, message: slot.message } }))
+      socket.close()
+      return
+    }
+    slot.streams.add(socket)
+    send(socket, JSON.stringify({ type: 'snapshot', observation: slot.market.observation() }))
     socket.on('message', (raw: Buffer) => {
-      void handleStream(socket, raw)
+      void handleStream(slot, socket, raw)
     })
-    socket.on('close', () => streams.delete(socket))
+    socket.on('close', () => slot.streams.delete(socket))
   })
 
   async function replyCommand(
+    slot: Slot,
     socket: Socket,
     result: { ok: true; events: unknown[]; observation: unknown } | Failure,
   ): Promise<void> {
@@ -308,16 +442,17 @@ export async function buildApp(options?: {
               duplicate: result.duplicate ?? false,
             },
           ],
-          observation: market.observation(),
+          observation: slot.market.observation(),
         }),
       )
     } else {
       send(socket, JSON.stringify({ type: 'error', error: { code: result.code, message: result.message } }))
     }
-    publish()
+    publish(slot)
   }
 
-  async function handleStream(socket: Socket, raw: Buffer): Promise<void> {
+  async function handleStream(slot: Slot, socket: Socket, raw: Buffer): Promise<void> {
+    const market = slot.market
     const message = parseMessage(raw)
     if (!message || typeof message.op !== 'string') {
       send(socket, JSON.stringify({ type: 'error', error: { code: 'invalid_message', message: 'Unrecognized stream command.' } }))
@@ -332,19 +467,19 @@ export async function buildApp(options?: {
         send(socket, JSON.stringify({ type: 'error', error: { code: 'invalid_message', message: 'place requires an order object.' } }))
         return
       }
-      await replyCommand(socket, await market.place(message.order))
+      await replyCommand(slot, socket, await market.place(message.order))
       return
     }
     if (message.op === 'cancel' && typeof message.clientOrderId === 'string') {
-      await replyCommand(socket, await market.cancel(message.clientOrderId))
+      await replyCommand(slot, socket, await market.cancel(message.clientOrderId))
       return
     }
     if (message.op === 'cancel_all') {
-      await replyCommand(socket, await market.cancelAll())
+      await replyCommand(slot, socket, await market.cancelAll())
       return
     }
     if (message.op === 'flatten') {
-      await replyCommand(socket, await market.flatten())
+      await replyCommand(slot, socket, await market.flatten())
       return
     }
     send(socket, JSON.stringify({ type: 'error', error: { code: 'invalid_message', message: 'Unrecognized stream command.' } }))
@@ -353,13 +488,16 @@ export async function buildApp(options?: {
   app.addHook('onClose', async () => {
     if (clock) clearInterval(clock)
     if (feed) clearInterval(feed)
-    await market.close()
+    for (const slot of [...slots.values()]) drop(slot)
+    await training.market.close()
     await options?.chain?.close()
   })
 
   return {
     app,
-    market,
+    get market() {
+      return (current ?? training).market
+    },
     async close() {
       await app.close()
     },

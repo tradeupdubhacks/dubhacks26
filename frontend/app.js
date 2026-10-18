@@ -728,7 +728,8 @@ async function startTrading() {
     openLiveModal(); connectWatch(); scheduleDuration();
   } catch (e) {
     if (e.code === 'offline') setStartError(`Can't reach the trading server at ${esc(API_BASE)}. Make sure it's running, then try again.`);
-    else if (e.code === 'session_running') setStartError('A trading session is already running on the server. <button class="link-btn" data-action="force-stop">Stop it and try again</button>');
+    else if (e.code === 'too_many_sessions') setStartError('The trading desk is full right now. Try again in a few minutes.');
+    else if (e.code === 'feed_unavailable') setStartError('Live Bitcoin prices are not available yet. Try again in a few seconds.');
     else setStartError(esc(e.message));
   } finally {
     startBusy = false; updateSummary();
@@ -972,7 +973,9 @@ function drawLive(canvas, pts, o) {
 function connectWatch() {
   closeWatch();
   let ws;
-  try { ws = new WebSocket(WS_BASE + '/v1/watch'); }
+  // Several people can trade at once, so watch only this page's own session.
+  const id = state.active ? state.active.sessionId : '';
+  try { ws = new WebSocket(WS_BASE + '/v1/watch?sessionId=' + encodeURIComponent(id)); }
   catch { live.reconnectTimer = setTimeout(connectWatch, 1500); return; }
   live.ws = ws; live.lastMsg = Date.now();
   ws.onopen = () => { live.connected = true; live.lastMsg = Date.now(); updateLive(); };
@@ -980,6 +983,7 @@ function connectWatch() {
     live.lastMsg = Date.now();
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if ((m.type === 'snapshot' || m.type === 'halt') && m.session) onSession(m.session);
+    else if (m.type === 'error' && m.error && m.error.code === 'unknown_session') lostSession();
   };
   ws.onclose = () => {
     if (live.ws !== ws) return;
@@ -1050,7 +1054,7 @@ async function endTrading(why = 'manual') {
   if (!state.active || live.stopping) return;
   live.stopping = true; live.stopWhy = why; setLiveError(''); updateLive();
   try {
-    finalizeRun(await api('/v1/stop', { method: 'POST' }));
+    finalizeRun(await api('/v1/stop', { method: 'POST', body: JSON.stringify({ sessionId: state.active.sessionId }) }));
   } catch (e) {
     live.stopping = false; live.stopWhy = null;
     if (e.code === 'no_session') { lostSession(); return; }
@@ -1093,10 +1097,6 @@ const actions = {
     updateSummary();
   },
   'start-trading': () => startTrading(),
-  'force-stop': async () => {
-    try { await api('/v1/stop', { method: 'POST' }); setStartError('Stopped the old session. Press Start trading again.'); }
-    catch (e) { setStartError(esc(e.message)); }
-  },
   'end-trading': () => endTrading('manual'),
   'close-live': () => closeLive(),
   'end-session': () => { if (!state.active) openEndConfirm(); },

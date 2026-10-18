@@ -447,7 +447,8 @@ export class Market {
     })
   }
 
-  openSession(input: Record<string, unknown>): Promise<{ ok: true; session: SessionView } | Failure> {
+  /** `id` comes from the gateway, which numbers sessions across every market it runs. */
+  openSession(input: Record<string, unknown>, id?: string): Promise<{ ok: true; session: SessionView } | Failure> {
     return this.run(async () => {
       if (this.mode === 'live' && !this.halted) {
         return failure(409, 'session_running', 'A session is already running. Stop it before starting another.')
@@ -499,7 +500,7 @@ export class Market {
         if (sol) this.solCents = sol.cents
       }
       this.session = {
-        id: `sess_${++this.sessionSeq}`,
+        id: id ?? `sess_${++this.sessionSeq}`,
         strategy: strategy as Strategy,
         deposit,
         floor,

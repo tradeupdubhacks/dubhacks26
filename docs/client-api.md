@@ -47,6 +47,26 @@ A halt cancels every open order, flattens the position with a fake market fill t
 
 Deposit bounds: `100` through `10000` cents (`$1.00` through `$100.00`).
 
+## Multiple sessions
+
+Up to 20 people can trade at once. Each `POST /v1/session` creates a separate session with its own position, cash, stake, floor, ceiling, and strategy. All sessions read the same live Bitcoin book, but each matches orders against its own copy, so one session's orders never fill against or move another's.
+
+A page should name its own session on every later call:
+
+| Call | How to name the session |
+| --- | --- |
+| `GET /v1/session` | `?sessionId=sess_7` |
+| `POST /v1/stop` | Body `{ "sessionId": "sess_7" }` |
+| `ws://…/v1/watch` | `?sessionId=sess_7` |
+
+Without a `sessionId`, these calls use the most recently created session, which may belong to someone else.
+
+- An unknown or expired id returns `404 unknown_session`. The watch socket sends that error and closes.
+- A halted session stays readable for 10 minutes, then it is dropped.
+- When 20 sessions are already running, `POST /v1/session` returns `409 too_many_sessions`.
+- `GET /v1/sessions` lists every session with `sessionId`, `status`, `strategy`, `instrument`, and `startedAt`.
+- `GET /v1/health` reports `sessions: { running, max }`.
+
 ## Instruments
 
 | Symbol | Data the book follows | Fills |

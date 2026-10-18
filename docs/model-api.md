@@ -20,6 +20,18 @@ Two ways to run, and they do not overlap:
 
 `POST /v1/reset` while a live session exists is refused so a trainer cannot rewind a person's stake. Stop the session from the page first, or train when the server is idle.
 
+## Multiple sessions
+
+The server runs one market per live session. Up to 20 run at once.
+
+**Finding sessions.** `GET /v1/sessions` lists every session with `sessionId`, `status`, `strategy`, `instrument`, and `startedAt`. A bot should trade only the running sessions of its own strategy.
+
+**Naming a session.** Add `?sessionId=sess_7` to `/v1/stream`, `/v1/account`, `/v1/book`, `/v1/bars`, `/v1/orders`, `DELETE /v1/orders/{id}`, `/v1/orders/cancel-all`, `/v1/flatten`, and `/v1/step`. Without it, these calls go to the most recently created session, or to the training market when there is no session.
+
+**Training.** `POST /v1/reset` always uses a separate training market. It is refused (`409 session_open`) while any session is running.
+
+**The bots in this repo** (`python -m model.live`) supervise. They poll `GET /v1/sessions` every second and run one trading task per running session of their strategy, each with its own state and its own stream. Every log line is tagged with its session id.
+
 ## Units
 
 | Field | Meaning |

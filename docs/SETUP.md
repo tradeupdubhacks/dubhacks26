@@ -90,6 +90,8 @@ BOT_STRATEGY=hft python -m model.live    # trades fast sessions
 
 Each bot ignores a session that belongs to the other strategy, so the two never trade the same session. Both were tuned with `FEE_MODEL=solana`.
 
+Several people can trade at the same time, up to 20 sessions. Each one is separate: its own stake, floor, ceiling, and strategy. One process of each bot trades all of its strategy's sessions, one task per session.
+
 ### Live Bitcoin prices
 
 By default (`BTC_FEED=live`), a live `BTC-USDT` session uses the live Binance USD-M BTCUSDT book: best bid and ask with sizes, plus trades, over the public websocket (`wss://fstream.binance.com`). This is the same feed the recorded tape and the bots' tuning data came from.

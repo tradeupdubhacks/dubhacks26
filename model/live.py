@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import functools
 import json
 import os
 import time
@@ -128,8 +130,12 @@ async def _send(socket, decision: Decision, sent_at: list[float], inflight: InFl
         await socket.send(json.dumps(message))
 
 
-async def session(base_url: str) -> None:
-    client = ModelClient(base_url)
+async def session(base_url: str, session_id: str | None = None) -> None:
+    """Trade one session. With `session_id`, only that session, returning once it halts.
+    Without one, the server's latest session, waiting for the next when it ends."""
+    # Tag every line with the session, since one bot now trades several at once.
+    print = functools.partial(builtins.print, f"[{session_id}]", flush=True) if session_id else builtins.print  # noqa: A001
+    client = ModelClient(base_url, session_id=session_id)
     client.health()
     catalog = {
         item["symbol"]: item
@@ -152,6 +158,7 @@ async def session(base_url: str) -> None:
     loop = asyncio.get_running_loop()
     last_decision = 0.0
     last_seed = float("-inf")
+    reload_reported = False
     waiting = False
     halted = False
     announced = False
@@ -244,7 +251,10 @@ async def session(base_url: str) -> None:
                     if history.get("market") == symbol:
                         scorer.reset()
                         loaded = scorer.seed(history.get("bars") or [])
-                        print(f"loaded {loaded} bars of price history from the server")
+                        # Reloads repeat every few seconds while the window fills; report only the first.
+                        if not reload_reported:
+                            print(f"loaded {loaded} bars of price history from the server")
+                            reload_reported = True
                 except ApiError as error:
                     print(f"no bar history ({error.code}), building the window live")
             expected = scorer.update(observation)
@@ -300,6 +310,8 @@ async def session(base_url: str) -> None:
                 if not halted:
                     print("session halted, not sending orders")
                     halted = True
+                if session_id:
+                    return
                 continue
             halted = False
             if decision.reason in ("no_session", "empty_book") and not decision.orders:
@@ -345,13 +357,31 @@ def strategy() -> str:
     return name
 
 
-async def run(base_url: str = "http://127.0.0.1:3000") -> None:
-    name = strategy()
-    if name == "hft":
-        from model.hft import session as run_session
-    else:
-        run_session = session
-    print(f"strategy: {name}")
+# How often the supervisor reads GET /v1/sessions for new sessions to trade.
+SESSION_POLL_S = 1.0
+
+
+async def _trade(run_session, base_url: str, session_id: str) -> None:
+    """Trade one session until it halts. Reconnect if the stream drops while it still runs."""
+    while True:
+        try:
+            await run_session(base_url, session_id)
+            return
+        except SystemExit:
+            raise
+        except Exception as error:
+            try:
+                status = (await asyncio.to_thread(ModelClient(base_url, session_id=session_id).session)).get("status")
+            except Exception:
+                status = None
+            if status != "running":
+                return
+            print(f"[{session_id}] stream closed ({error!r}). Reconnecting.")
+            await asyncio.sleep(1)
+
+
+async def _single(run_session, base_url: str) -> None:
+    """Older servers run one session at a time and have no session list."""
     while True:
         try:
             await run_session(base_url)
@@ -360,6 +390,54 @@ async def run(base_url: str = "http://127.0.0.1:3000") -> None:
         except Exception as error:
             print(f"stream closed ({error!r}). Reconnecting.")
             await asyncio.sleep(1)
+
+
+async def run(base_url: str = "http://127.0.0.1:3000") -> None:
+    """Supervisor: trade every running session of this bot's strategy, one task per session."""
+    name = strategy()
+    if name == "hft":
+        from model.hft import OWN_STRATEGIES as own
+        from model.hft import session as run_session
+    else:
+        own, run_session = OWN_STRATEGIES, session
+    print(f"strategy: {name}")
+    client = ModelClient(base_url)
+    try:
+        await asyncio.to_thread(client.sessions)
+    except ApiError as error:
+        if error.status == 404:
+            print("this server has no GET /v1/sessions. trading its one session")
+            await _single(run_session, base_url)
+            return
+    except Exception:
+        pass  # server not up yet; the loop below keeps trying
+    print(f"watching {client.base_url}/v1/sessions for {' and '.join(str(x) for x in own if x)} sessions")
+    tasks: dict[str, asyncio.Task] = {}
+    down = False
+    while True:
+        try:
+            listed = await asyncio.to_thread(client.sessions)
+            if down:
+                print("server is back")
+            down = False
+        except Exception as error:
+            if not down:
+                print(f"cannot list sessions ({error!r}). retrying")
+            down = True
+            await asyncio.sleep(2)
+            continue
+        for item in listed:
+            session_id = item.get("sessionId")
+            if not session_id or item.get("status") != "running" or item.get("strategy") not in own:
+                continue
+            task = tasks.get(session_id)
+            if task is None or task.done():
+                print(f"[{session_id}] new {item.get('strategy')} session, trading it")
+                tasks[session_id] = asyncio.create_task(_trade(run_session, base_url, session_id))
+        listed_ids = {item.get("sessionId") for item in listed}
+        for session_id in [sid for sid, task in tasks.items() if task.done() and sid not in listed_ids]:
+            del tasks[session_id]
+        await asyncio.sleep(SESSION_POLL_S)
 
 
 def main() -> None:
