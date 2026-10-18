@@ -142,6 +142,12 @@ export async function buildApp(options?: {
     return reply.type('text/html').send(html)
   })
 
+  // index.html loads these two files by relative URL, so the page needs them from the same origin.
+  const assets = [['app.js', 'text/javascript'], ['style.css', 'text/css']] as const
+  for (const [name, type] of assets) {
+    app.get(`/${name}`, async (_request, reply) => reply.type(type).send(await readFile(join(root, 'frontend', name))))
+  }
+
   app.get('/v1/health', async () => ({
     ok: true,
     mode: 'localhost',
