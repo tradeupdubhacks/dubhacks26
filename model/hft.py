@@ -12,8 +12,13 @@ one-tick spread a taker pays.
 - Long: sell everything at the bid once imbalance <= -HFT_EXIT_IMBALANCE (default 0, i.e. the
   book stops leaning our way) or after HFT_MAX_HOLD_S seconds (default 5). Short is the mirror.
 
-Size is HFT_LOTS (default 100, about $8,400 of BTC), capped at HFT_MAX_LEVERAGE times the stake
-(default 100). There is no stop-loss beyond the hold limit; the session floor is the hard limit.
+Size is HFT_LOTS (default 150, about $12,600 of BTC), capped at HFT_MAX_LEVERAGE times the stake
+(default 150). There is no stop-loss beyond the hold limit; the session floor is the hard limit.
+
+Size was raised 1.5x from 100 lots / 100x. On 48 ten-minute windows of the 2026-10-01 tape
+(model/backtest.py StepEnv, Solana fee, a $100 stake, -20% floor, +$5 goal), both sizes reached the
+goal in every window; 1.5x got there in a median 0.7 minutes instead of 1.0, and its worst dip was
+-$3.13 instead of -$2.09.
 
 Simulated on 26 ten-minute windows of recorded BTCUSDT (2026-10-01 and 2026-10-17) through the
 server with FEE_MODEL=solana, a $100 stake reached +$5 in all 26, with a median of about
@@ -47,8 +52,8 @@ class HftConfig:
     enter_imbalance: float = 0.6
     exit_imbalance: float = 0.0
     max_hold_s: float = 5.0
-    lots: int = 100
-    max_leverage: float = 100.0
+    lots: int = 150
+    max_leverage: float = 150.0
 
     @classmethod
     def from_env(cls) -> "HftConfig":

@@ -61,9 +61,9 @@ def test_exits_after_the_hold_limit_even_if_the_signal_stays():
 
 
 def test_size_is_capped_by_leverage_on_the_stake():
-    # A $5 stake at 100x is $500 of notional: six $80 lots.
-    assert trader().size(8_000_000, 500, BTC) == 6
-    assert trader().size(8_000_000, 10_000, BTC) == 100
+    # A $5 stake at 150x is $750 of notional: nine $80 lots.
+    assert trader().size(8_000_000, 500, BTC) == 9
+    assert trader().size(8_000_000, 10_000, BTC) == 150
 
 
 def test_round_trips_report_cash_including_fees():
