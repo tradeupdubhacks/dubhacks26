@@ -20,6 +20,18 @@ Two ways to run, and they do not overlap:
 
 `POST /v1/reset` while a live session exists is refused so a trainer cannot rewind a person's stake. Stop the session from the page first, or train when the server is idle.
 
+## Multiple sessions
+
+The server runs one market per live session. Up to 20 run at once.
+
+**Finding sessions.** `GET /v1/sessions` lists every session with `sessionId`, `status`, `strategy`, `instrument`, and `startedAt`. A bot should trade only the running sessions of its own strategy.
+
+**Naming a session.** Add `?sessionId=sess_7` to `/v1/stream`, `/v1/account`, `/v1/book`, `/v1/bars`, `/v1/orders`, `DELETE /v1/orders/{id}`, `/v1/orders/cancel-all`, `/v1/flatten`, and `/v1/step`. Without it, these calls go to the most recently created session, or to the training market when there is no session.
+
+**Training.** `POST /v1/reset` always uses a separate training market. It is refused (`409 session_open`) while any session is running.
+
+**The bots in this repo** (`python -m model.live`) supervise. They poll `GET /v1/sessions` every second and run one trading task per running session of their strategy, each with its own state and its own stream. Every log line is tagged with its session id.
+
 ## Units
 
 | Field | Meaning |
@@ -32,7 +44,7 @@ Two ways to run, and they do not overlap:
 
 `BTC-USDT` tick is `10` cents. `SOL-USD` tick is `1` cent. Notional cents of a fill is `round(price * size / 1000)`.
 
-Fees on every instrument: `2` bps maker, `5` bps taker, rounded down to a cent on the fill notional.
+Fees depend on the server's `FEE_MODEL` environment variable. **`solana` (the default)** charges no exchange fee; each fill pays the network fee of its settlement transaction (two 5,000-lamport signatures at the SOL price, about 0.1 cent, with the fraction carried to the next fill). **`exchange`** charges `2` bps maker and `5` bps taker (Binance's regular-user futures rates) on the fill notional, rounded down to a cent. `GET /v1/instruments` reports the model and rates in force under `fees`.
 
 Latency: an accepted order waits `50ms` of **market** time before it can match. A `step` with `dtMs: 10` leaves it `pending`. A later step that carries the clock past `50ms` releases it. On a live session the wall clock releases it. Flatten, halt, and a user Stop skip this delay.
 
@@ -196,6 +208,7 @@ The book and the pool account. Returned by `GET /v1/account`, `POST /v1/reset`, 
 | `stakeCents` | integer \| `null` | User stake when a live session exists. `null` in training. |
 | `floorCents` | integer \| `null` | |
 | `ceilingCents` | integer \| `null` | |
+| `strategy` | `"hft"` \| `"network"` \| `"transformer"` \| `"small"` \| `null` | The live session's strategy. `null` outside a live session. A bot should trade only the sessions of its own strategy. |
 | `step` | integer | Steps since reset. `0` in a live session that has not been stepped. |
 | `done` | boolean | Training episode finished. Always `false` in a live session. |
 

@@ -12,6 +12,28 @@ export interface TopOfBook {
   trade: { price: number; size: number; side: Side } | null
 }
 
+/** Where a BTC-USDT book comes from: the recorded tape, or a live feed. */
+export interface BtcSource {
+  readonly available: boolean
+  open(): Promise<TopOfBook>
+  /** The book at market time `marketMs`, with a trade only if one printed since the last call. */
+  advance(marketMs: number): Promise<TopOfBook>
+  rebase(marketMs: number): void
+  close(): Promise<void>
+}
+
+/** A live BTC-USDT feed. It keeps running between sessions and remembers recent history. */
+export interface LiveBtcSource extends BtcSource {
+  /** True when no update has arrived for a few seconds. */
+  readonly stale: boolean
+  /** Up to `count` samples of the book, one per 200ms, oldest first. */
+  history(count: number): TopOfBook[]
+  /** A view with its own trade cursor, for one of several sessions reading this feed. */
+  view?(): LiveBtcSource
+  /** Stop delivering trades to this view. */
+  release?(): void
+}
+
 interface BookRow {
   tsUs: number
   bid: number
@@ -37,7 +59,7 @@ interface CsvCursor<T> {
  * Streams the local Tardis book-ticker and trades files. Market time 0 is the
  * first book-ticker timestamp. Callers advance an absolute market clock.
  */
-export class BtcTape {
+export class BtcTape implements BtcSource {
   private book: CsvCursor<BookRow> | null = null
   private trades: CsvCursor<TradeRow> | null = null
   private originUs = 0
@@ -168,13 +190,13 @@ function parseTrade(line: string): TradeRow | null {
   return { tsUs, price, size, side }
 }
 
-function cents(raw: string): number {
+export function cents(raw: string): number {
   const value = Number(raw)
   if (!Number.isFinite(value)) return 0
   return Math.round(value * 100)
 }
 
-function lots(raw: string): number {
+export function lots(raw: string): number {
   const value = Number(raw)
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.round(value / 0.001))

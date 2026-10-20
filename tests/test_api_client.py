@@ -28,8 +28,9 @@ def test_health_is_fake_execution():
 def test_reset_is_refused_while_a_session_is_open():
     client = ModelClient()
     account = client.account()
-    if account.get("stakeCents") is None:
-        pytest.skip("no live session is open")
+    # Reset is refused while any session is running. A halted session still has a stake.
+    if account.get("stakeCents") is None or account.get("halted"):
+        pytest.skip("no live session is running")
     with pytest.raises(Exception) as caught:
         client.reset({"instrument": "BTC-USDT"})
     assert getattr(caught.value, "code", "") == "session_open"

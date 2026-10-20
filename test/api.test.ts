@@ -1,19 +1,25 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import type { FastifyInstance } from 'fastify'
-import { buildApp } from '../src/app.js'
+import { buildApp, type App } from '../src/app.js'
 import type { Chain, SettlementLeg } from '../src/chain.js'
 import type { Market } from '../src/market.js'
 
 describe('gateway', () => {
   let app: FastifyInstance
-  let market: Market
+  let built: App
   let close: () => Promise<void>
+  // Each live session has its own market, so read the gateway's current one at call time.
+  const market = new Proxy({} as Market, {
+    get: (_target, key) => {
+      const value = (built.market as unknown as Record<PropertyKey, unknown>)[key]
+      return typeof value === 'function' ? value.bind(built.market) : value
+    },
+  })
 
   before(async () => {
-    const built = await buildApp({ clock: false })
+    built = await buildApp({ clock: false })
     app = built.app
-    market = built.market
     close = built.close
   })
 
@@ -193,13 +199,19 @@ describe('gateway', () => {
 
 describe('order lifecycle', () => {
   let app: FastifyInstance
-  let market: Market
+  let built: App
   let close: () => Promise<void>
+  // Each live session has its own market, so read the gateway's current one at call time.
+  const market = new Proxy({} as Market, {
+    get: (_target, key) => {
+      const value = (built.market as unknown as Record<PropertyKey, unknown>)[key]
+      return typeof value === 'function' ? value.bind(built.market) : value
+    },
+  })
 
   before(async () => {
-    const built = await buildApp({ clock: false })
+    built = await buildApp({ clock: false })
     app = built.app
-    market = built.market
     close = built.close
   })
 
@@ -551,5 +563,257 @@ describe('solana settlement', () => {
     assert.equal(settled[0]![0]!.lots, 2)
     assert.ok(settled[0]![0]!.quoteCents > 0)
     await built.close()
+  })
+})
+
+describe('fee model', () => {
+  it('reports Phoenix-style basis points by default', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      const fees = (await built.app.inject({ method: 'GET', url: '/v1/instruments' })).json().fees
+      assert.deepEqual(fees, { model: 'exchange', makerBps: 2, takerBps: 5, solanaFeeCents: 0 })
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('charges only the Solana network fee, carrying fractions of a cent', async () => {
+    const built = await buildApp({ clock: false, feeModel: 'solana' })
+    try {
+      const { app } = built
+      const fees = (await app.inject({ method: 'GET', url: '/v1/instruments' })).json().fees
+      assert.equal(fees.model, 'solana')
+      assert.equal(fees.makerBps, 0)
+      assert.equal(fees.takerBps, 0)
+      // Two 5,000-lamport signatures at the default $100 SOL reference: 0.1 cents per fill.
+      assert.ok(Math.abs(fees.solanaFeeCents - 0.1) < 1e-9)
+
+      await app.inject({ method: 'POST', url: '/v1/reset', payload: { instrument: 'SOL-USD', seed: 6 } })
+      const charged: number[] = []
+      let paid = 0
+      for (let i = 0; i < 25; i += 1) {
+        const book = (await app.inject({ method: 'GET', url: '/v1/book' })).json()
+        const ask = book.asks[0].price
+        const step = await app.inject({
+          method: 'POST',
+          url: '/v1/step',
+          payload: { dtMs: 100, orders: [{ clientOrderId: `sf${i}`, side: 'buy', size: 1, type: 'ioc', price: ask + 20 }] },
+        })
+        for (const event of step.json().events as Array<{ type: string; clientOrderId: string; fee: number; price: number; size: number }>) {
+          if (event.type === 'fill' && event.clientOrderId === `sf${i}`) {
+            charged.push(event.fee)
+            paid += Math.round((event.price * event.size) / 1_000)
+          }
+        }
+      }
+      assert.equal(charged.length, 25)
+      assert.ok(charged.every((fee) => fee === 0 || fee === 1))
+      assert.equal(charged.reduce((sum: number, fee) => sum + fee, 0), 2)
+      const account = (await app.inject({ method: 'GET', url: '/v1/account' })).json()
+      assert.equal(account.freeCashCents, 10_000_000 - paid - 2)
+    } finally {
+      await built.close()
+    }
+  })
+})
+
+describe('session strategy', () => {
+  it('defaults to the network model on BTC-USDT and reports it to the page and the bots', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      const { app } = built
+      const opened = await app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 10_500 } })
+      assert.equal(opened.statusCode, 201)
+      assert.equal(opened.json().instrument, 'BTC-USDT')
+      assert.equal(opened.json().strategy, 'network')
+      const observation = (await app.inject({ method: 'GET', url: '/v1/account' })).json()
+      assert.equal(observation.strategy, 'network')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('takes a model id, maps the old fast/safe names, and refuses an unknown one', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      const { app } = built
+      const bad = await app.inject({
+        method: 'POST',
+        url: '/v1/session',
+        payload: { depositCents: 10_000, ceilingCents: 10_500, strategy: 'yolo' },
+      })
+      assert.equal(bad.statusCode, 400)
+      assert.equal(bad.json().error.code, 'bad_strategy')
+      const fast = await app.inject({
+        method: 'POST',
+        url: '/v1/session',
+        payload: { depositCents: 10_000, ceilingCents: 10_500, strategy: 'fast' },
+      })
+      assert.equal(fast.statusCode, 201)
+      assert.equal(fast.json().strategy, 'hft')                         // 'fast' is the old name for the hft bot
+      assert.equal((await app.inject({ method: 'GET', url: '/v1/session' })).json().strategy, 'hft')
+      const transformer = await app.inject({
+        method: 'POST',
+        url: '/v1/session',
+        payload: { depositCents: 10_000, ceilingCents: 10_500, strategy: 'transformer' },
+      })
+      assert.equal(transformer.json().strategy, 'transformer')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('reports no strategy outside a live session', async () => {
+    const built = await buildApp({ clock: false })
+    try {
+      await built.app.inject({ method: 'POST', url: '/v1/reset', payload: { instrument: 'BTC-USDT' } })
+      assert.equal((await built.app.inject({ method: 'GET', url: '/v1/account' })).json().strategy, null)
+    } finally {
+      await built.close()
+    }
+  })
+})
+
+describe('live BTC feed', () => {
+  class FakeFeed {
+    stale = false
+    ready = true
+    book = { bid: 8_000_000, bidSize: 300, ask: 8_000_010, askSize: 200 }
+    get available() { return this.ready && !this.stale }
+    async open() { return { ...this.book, trade: null } }
+    async advance() { return { ...this.book, trade: null } }
+    rebase() {}
+    async close() {}
+    history(count: number) {
+      return Array.from({ length: Math.min(count, 50) }, (_, i) => ({ ...this.book, bid: this.book.bid - 10 * (50 - i), ask: this.book.ask - 10 * (50 - i), trade: null }))
+    }
+  }
+
+  it('gives a live BTC session the feed, its history, and no fast-forward', async () => {
+    const feed = new FakeFeed()
+    const built = await buildApp({ clock: false, btcFeed: feed })
+    try {
+      const { app } = built
+      const btc = (await app.inject({ method: 'GET', url: '/v1/instruments' })).json().instruments.find((i: { symbol: string }) => i.symbol === 'BTC-USDT')
+      assert.equal(btc.data, 'live')
+      const opened = await app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 10_500 } })
+      assert.equal(opened.statusCode, 201)
+      assert.equal(opened.json().priceSource, 'binance')
+      assert.equal(opened.json().midCents, 8_000_005)
+      const bars = (await app.inject({ method: 'GET', url: '/v1/bars' })).json().bars
+      assert.equal(bars.length, 50)
+      assert.equal(bars[bars.length - 1].ts, 0)
+      const step = await app.inject({ method: 'POST', url: '/v1/step', payload: { dtMs: 200 } })
+      assert.equal(step.statusCode, 409)
+      assert.equal(step.json().error.code, 'step_not_for_live_feed')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('refuses a BTC session while the feed has no prices, and trains on the tape', async () => {
+    const feed = new FakeFeed()
+    feed.ready = false
+    const built = await buildApp({ clock: false, btcFeed: feed })
+    try {
+      const { app } = built
+      const refused = await app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 10_500 } })
+      assert.equal(refused.statusCode, 503)
+      assert.equal(refused.json().error.code, 'feed_unavailable')
+      const reset = await app.inject({ method: 'POST', url: '/v1/reset', payload: { instrument: 'BTC-USDT' } })
+      assert.equal(reset.json().observation.priceSource, 'tape')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('turns Binance messages into cents and 0.001 BTC lots', async () => {
+    const { BinanceBtcFeed } = await import('../src/binance.js')
+    const feed = new BinanceBtcFeed()
+    feed.receive(JSON.stringify({ data: { e: 'bookTicker', b: '81330.80', B: '6.877', a: '81330.90', A: '2.047' } }))
+    feed.receive(JSON.stringify({ data: { e: 'trade', p: '81330.90', q: '0.015', m: false, X: 'MARKET' } }))
+    assert.deepEqual(await feed.advance(0), {
+      bid: 8_133_080, bidSize: 6_877, ask: 8_133_090, askSize: 2_047, trade: { price: 8_133_090, size: 15, side: 'buy' },
+    })
+    assert.equal((await feed.advance(200)).trade, null)
+    assert.equal(feed.available, true)
+  })
+})
+
+describe('concurrent sessions', () => {
+  class SharedFeed {
+    stale = false
+    book = { bid: 8_000_000, bidSize: 300, ask: 8_000_010, askSize: 200 }
+    get available() { return true }
+    async open() { return { ...this.book, trade: null } }
+    async advance() { return { ...this.book, trade: null } }
+    rebase() {}
+    async close() {}
+    history() { return [] }
+    view() { return this }
+  }
+
+  const open = (app: FastifyInstance, strategy: string) =>
+    app.inject({ method: 'POST', url: '/v1/session', payload: { depositCents: 10_000, ceilingCents: 20_000, strategy } })
+
+  it('keeps each session separate', async () => {
+    const built = await buildApp({ clock: false, btcFeed: new SharedFeed() })
+    try {
+      const { app } = built
+      const a = (await open(app, 'fast')).json()
+      const b = (await open(app, 'safe')).json()
+      assert.notEqual(a.sessionId, b.sessionId)
+      const listed = (await app.inject({ method: 'GET', url: '/v1/sessions' })).json().sessions
+      assert.deepEqual(listed.map((s: { sessionId: string; strategy: string }) => [s.sessionId, s.strategy]), [[a.sessionId, 'hft'], [b.sessionId, 'network']])
+
+      const order = await app.inject({
+        method: 'POST',
+        url: `/v1/orders?sessionId=${a.sessionId}`,
+        payload: { clientOrderId: 'a1', side: 'buy', size: 5, type: 'limit', price: 7_000_000 },
+      })
+      assert.equal(order.statusCode, 200)
+      const openA = (await app.inject({ method: 'GET', url: `/v1/account?sessionId=${a.sessionId}` })).json().openOrders
+      const openB = (await app.inject({ method: 'GET', url: `/v1/account?sessionId=${b.sessionId}` })).json().openOrders
+      assert.equal(openA.length, 1)
+      assert.equal(openB.length, 0)
+
+      const stopped = await app.inject({ method: 'POST', url: '/v1/stop', payload: { sessionId: a.sessionId } })
+      assert.equal(stopped.json().status, 'halted')
+      assert.equal((await app.inject({ method: 'GET', url: `/v1/session?sessionId=${b.sessionId}` })).json().status, 'running')
+
+      const missing = await app.inject({ method: 'GET', url: '/v1/session?sessionId=sess_999' })
+      assert.equal(missing.statusCode, 404)
+      assert.equal(missing.json().error.code, 'unknown_session')
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('caps how many sessions trade at once', async () => {
+    const { MAX_SESSIONS } = await import('../src/app.js')
+    const built = await buildApp({ clock: false, btcFeed: new SharedFeed() })
+    try {
+      for (let i = 0; i < MAX_SESSIONS; i += 1) assert.equal((await open(built.app, 'fast')).statusCode, 201)
+      const over = await open(built.app, 'fast')
+      assert.equal(over.statusCode, 409)
+      assert.equal(over.json().error.code, 'too_many_sessions')
+      const health = (await built.app.inject({ method: 'GET', url: '/v1/health' })).json()
+      assert.deepEqual(health.sessions, { running: MAX_SESSIONS, max: MAX_SESSIONS })
+    } finally {
+      await built.close()
+    }
+  })
+
+  it('delivers every live trade to every session on the shared feed', async () => {
+    const { BinanceBtcFeed } = await import('../src/binance.js')
+    const feed = new BinanceBtcFeed()
+    const first = feed.view()
+    const second = feed.view()
+    feed.receive(JSON.stringify({ data: { e: 'bookTicker', b: '81330.80', B: '1', a: '81330.90', A: '1' } }))
+    feed.receive(JSON.stringify({ data: { e: 'trade', p: '81330.90', q: '0.002', m: true, X: 'MARKET' } }))
+    assert.deepEqual((await first.advance(0)).trade, { price: 8_133_090, size: 2, side: 'sell' })
+    assert.deepEqual((await second.advance(0)).trade, { price: 8_133_090, size: 2, side: 'sell' })
+    assert.equal((await first.advance(200)).trade, null)
+    second.release?.()
   })
 })

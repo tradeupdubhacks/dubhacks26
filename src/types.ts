@@ -1,6 +1,7 @@
 export const HOUSE_CENTS = 10_000_000
 export const DEPOSIT_MIN = 100
 export const DEPOSIT_MAX = 10_000
+// Exchange (market) fee rates in basis points. They are charged only when FEE_MODEL=exchange (see FeeModel below).
 export const MAKER_BPS = 2
 export const TAKER_BPS = 5
 export const LATENCY_MS = 50
@@ -69,6 +70,17 @@ export function feeCents(notional: number, bps: number): number {
   return Math.floor((notional * bps) / 10_000)
 }
 
+/**
+ * How fills are charged. `exchange` is the Phoenix-style maker/taker fee in basis points.
+ * `solana` charges no exchange fee, only the network fee of the fill's settlement
+ * transaction: two signatures (pool and counterparty) at the 5,000-lamport base fee.
+ */
+export type FeeModel = 'exchange' | 'solana'
+export const FEE_MODELS: readonly FeeModel[] = ['exchange', 'solana']
+export const SOLANA_LAMPORTS_PER_SIGNATURE = 5_000
+export const SETTLEMENT_SIGNATURES = 2
+export const LAMPORTS_PER_SOL = 1_000_000_000
+
 export interface BookLevel {
   price: number
   size: number
@@ -104,6 +116,19 @@ export interface TradePrint {
   ts: number
 }
 
+/**
+ * Which model trades a live session. The ids are the models in src/bot.ts (BOT_MODELS):
+ * `hft` the rule-based high-frequency bot (model/hft.py, "Faster"), `network` the team network with the
+ * hybrid policy (model/live.py, "Slower"), and the session models `transformer` and `small`
+ * (model/live_session.py). Each model's bot trades only the sessions tagged with its id.
+ */
+export type Strategy = 'hft' | 'network' | 'transformer' | 'small'
+export const STRATEGIES: readonly Strategy[] = ['hft', 'network', 'transformer', 'small']
+/** Names from before the model ids. POST /v1/session still accepts them. */
+export const STRATEGY_ALIASES: Readonly<Record<string, Strategy>> = { fast: 'hft', safe: 'network' }
+export const DEFAULT_STRATEGY: Strategy = 'network'
+export const DEFAULT_INSTRUMENT: InstrumentSymbol = 'BTC-USDT'
+
 export interface Observation {
   market: string
   clock: 'step' | 'wall'
@@ -125,6 +150,8 @@ export interface Observation {
   stakeCents: number | null
   floorCents: number | null
   ceilingCents: number | null
+  /** The live session's strategy, so each bot trades only its own sessions. Null outside a live session. */
+  strategy: Strategy | null
   step: number
   done: boolean
 }
@@ -167,6 +194,7 @@ export interface SessionView {
   status: 'running' | 'halted'
   halt: HaltView | null
   instrument: InstrumentSymbol
+  strategy: Strategy
   depositCents: number
   floorCents: number
   ceilingCents: number

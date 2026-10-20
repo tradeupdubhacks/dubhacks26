@@ -1,7 +1,8 @@
 /* ============================================================
    CONFIG
    ============================================================ */
-const API_BASE = 'http://localhost:3000'; // trading server (client API)
+// trading server (client API): the origin that served this page, or a local server when opened from disk
+const API_BASE = location.protocol.startsWith('http') ? location.origin : 'http://127.0.0.1:3000';
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const STORAGE_KEY = 'shopState.v2';
 const HISTORY_DAYS = 90;
@@ -12,16 +13,22 @@ const HISTORY_INTERVAL = '1d';
    DATA
    ============================================================ */
 const PRODUCTS = [
-  { id: 'p1', name: 'Wireless Headphones', price: 79.99, emoji: '🎧', desc: 'Noise-cancelling, 30h battery.' },
-  { id: 'p2', name: 'Smartwatch',          price: 149.00, emoji: '⌚', desc: 'Fitness tracking and notifications.' },
-  { id: 'p3', name: 'Travel Backpack',     price: 54.50,  emoji: '🎒', desc: '25L, water resistant.' },
+  { id: 'p1', name: 'Wireless Headphones', price: 79.99, img: 'img/p1.jpg', desc: 'Noise-cancelling, 30h battery.' },
+  { id: 'p2', name: 'Smartwatch',          price: 149.00, img: 'img/p2.jpg', desc: 'Fitness tracking and notifications.' },
+  { id: 'p3', name: 'Travel Backpack',     price: 54.50,  img: 'img/p3.jpg', desc: '25L, water resistant.' },
+  { id: 'p4', name: 'Mechanical Keyboard', price: 89.00,  img: 'img/p4.jpg', desc: 'Hot-swappable switches, RGB backlight.' },
+  { id: 'p5', name: 'Bluetooth Speaker',   price: 39.99,  img: 'img/p5.jpg', desc: 'Waterproof, 12h playtime.' },
+  { id: 'p6', name: 'Instant Camera',      price: 69.95,  img: 'img/p6.jpg', desc: 'Prints photos in seconds.' },
+  { id: 'p7', name: 'Running Shoes',       price: 99.00,  img: 'img/p7.jpg', desc: 'Lightweight with responsive cushioning.' },
+  { id: 'p8', name: 'Coffee Grinder',      price: 34.50,  img: 'img/p8.jpg', desc: 'Burr grinder, 15 grind settings.' },
+  { id: 'p9', name: 'Desk Lamp',           price: 29.99,  img: 'img/p9.jpg', desc: 'Dimmable LED with USB charging port.' },
 ];
 
 // Display info per coin. The server supplies symbol, base and data type; price history comes
 // from GET /v1/history (see loadHistory). The seeded series below is only a fallback.
 const COIN_META = {
   BTC: { name: 'Bitcoin', seed: 22, drift: 0.0008, vol: 0.025,
-    notes: ['Steadier of the two: smaller swings', 'Tends to lead the rest of the crypto market'] },
+    notes: ['Tends to lead the rest of the crypto market'] },
   SOL: { name: 'Solana', seed: 11, drift: 0.0010, vol: 0.040,
     notes: ['Bigger swings than Bitcoin', 'Moves with overall crypto sentiment'] },
 };
@@ -53,6 +60,29 @@ let market = {
     { symbol: 'SOL-USD', base: 'SOL', data: 'live' },
   ],
 };
+
+// Every session trades Bitcoin. The user picks which bot runs it; the server tags the
+// session with the strategy, and each bot trades only its own sessions.
+const TRADE_SYMBOL = 'BTC-USDT';
+// The models a session can use. The ids are the server's model ids (GET /v1/bot); the page shows
+// one card per model the server offers, in this order, with these names and risk tags.
+const STRATEGY_CARDS = [
+  { id: 'network', name: 'Slower', tag: 'low risk', tagClass: 'low' },        // the team network, hybrid policy
+  { id: 'transformer', name: 'Transformer', tag: 'medium risk', tagClass: 'medium' }, // model/live_session.py
+  { id: 'hft', name: 'Faster', tag: 'high risk', tagClass: 'high' },          // model/hft.py, the rule bot
+  { id: 'small', name: 'Small network', tag: 'rarely trades', tagClass: 'pending' },  // model/live_session.py
+];
+const DEFAULT_STRATEGY = 'network';
+// Older saved choices: the first two cards' ids, and the model dropdown's.
+const STRATEGY_ALIASES = { fast: 'hft', safe: 'network' };
+/** The cards to show: the models the server can run for Bitcoin, or every card when it runs no bot. */
+function strategies() {
+  if (!botInfo || !botInfo.enabled) return STRATEGY_CARDS;
+  const offered = new Set(botInfo.models.filter(m => m.instruments.includes(TRADE_SYMBOL)).map(m => m.id));
+  const shown = STRATEGY_CARDS.filter(x => offered.has(x.id));
+  return shown.length ? shown : STRATEGY_CARDS;
+}
+const strategyOf = id => STRATEGY_CARDS.find(x => x.id === (STRATEGY_ALIASES[id] || id)) || STRATEGY_CARDS[1];
 
 /* ============================================================
    FAKE HISTORY GENERATION (seeded so charts stay stable)
@@ -181,7 +211,7 @@ function refreshHistoryUI() {
    ============================================================ */
 const defaultState = () => ({
   cart: {},                 // productId -> qty
-  trade: { symbol: 'SOL-USD', amount: null, maxLoss: 20, target: 5, hours: 0, minutes: 0 },
+  trade: { symbol: TRADE_SYMBOL, strategy: DEFAULT_STRATEGY, amount: null, maxLoss: 20, target: 5, hours: 0, minutes: 0 },
   runs: [],                 // finished trading sessions for this order
   active: null,             // the trading session running right now
   ended: false,             // true once END SESSION is confirmed
@@ -276,13 +306,43 @@ async function loadMarket() {
       fees: r.fees,
       instruments: r.instruments,
     };
-    if (!market.instruments.some(i => i.symbol === state.trade.symbol)) {
-      state.trade.symbol = market.instruments[0].symbol;
-      save();
-    }
+    const symbol = market.instruments.some(i => i.symbol === TRADE_SYMBOL) ? TRADE_SYMBOL : market.instruments[0].symbol;
+    if (state.trade.symbol !== symbol) { state.trade.symbol = symbol; save(); }
     market.instruments.forEach(loadHistory);
     if (currentPath() === '/trading' && modal !== 'live') renderTrading();
   } finally { loadingMarket = false; }
+}
+
+// The trading models the server can start for a session (GET /v1/bot). null until loaded, or when the server runs without a bot.
+let botInfo = null;
+async function loadBotInfo() {
+  try { botInfo = await api('/v1/bot'); } catch { botInfo = null; }
+  refreshHistoryUI();
+}
+function chosenModel() {
+  if (!botInfo || !botInfo.enabled) return null;
+  const id = state.trade.model;
+  return botInfo.models.find(m => m.id === id) || botInfo.models.find(m => m.id === botInfo.selected) || botInfo.models[0] || null;
+}
+function modelHint() {
+  const m = chosenModel();
+  if (!m) return '';
+  if (!m.instruments.length) return m.description;
+  const sym = state.trade.symbol;
+  return m.instruments.includes(sym)
+    ? m.description
+    : `${m.description} It does not trade ${sym.split('-')[0]}, so nothing will trade this session. Pick another model or coin.`;
+}
+function modelFieldHTML() {
+  if (!botInfo || !botInfo.enabled || !botInfo.models.length) return '';
+  const cur = chosenModel();
+  return `
+              <label class="field">Trading model
+                <select data-field="model">
+                  ${botInfo.models.map(m => `<option value="${esc(m.id)}" ${cur && m.id === cur.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}
+                </select>
+                <span class="hint" id="model-hint">${esc(modelHint())}</span>
+              </label>`;
 }
 
 async function checkHealth() {
@@ -290,6 +350,7 @@ async function checkHealth() {
     await api('/v1/health');
     setOnline(true);
     if (!market.loaded) await loadMarket();
+    if (!botInfo) await loadBotInfo();
   } catch { setOnline(false); }
 }
 
@@ -303,7 +364,10 @@ function ensureTradeDefaults() {
   const t = state.trade, min = minInvestC(), max = maxInvestC();
   if (t.amount == null) t.amount = Math.min(Math.max(Math.round(cartTotalC() * 0.10), min), max) / 100;
   else if (Math.round(t.amount * 100) > max) t.amount = max / 100;
-  if (!market.instruments.some(i => i.symbol === t.symbol)) t.symbol = market.instruments[0].symbol;
+  t.symbol = market.instruments.some(i => i.symbol === TRADE_SYMBOL) ? TRADE_SYMBOL : market.instruments[0].symbol;
+  if (STRATEGY_ALIASES[t.strategy]) t.strategy = STRATEGY_ALIASES[t.strategy];
+  if (!t.strategy && t.model) t.strategy = t.model;                          // a choice made in the old model dropdown
+  if (!strategies().some(x => x.id === t.strategy)) t.strategy = DEFAULT_STRATEGY;
 }
 
 function validateTrade() {
@@ -342,7 +406,7 @@ function renderHome() {
       <div class="grid">
         ${PRODUCTS.map(p => `
           <div class="card product">
-            <div class="product-img">${p.emoji}</div>
+            <img class="product-img" src="${p.img}" alt="${esc(p.name)}">
             <h3>${p.name}</h3>
             <div class="muted small">${p.desc}</div>
             <div class="price">${money(p.price)}</div>
@@ -368,7 +432,7 @@ function renderCart() {
         <div class="card">
           ${items.map(i => `
             <div class="row">
-              <div class="thumb">${i.emoji}</div>
+              <img class="thumb" src="${i.img}" alt="">
               <div class="info"><strong>${i.name}</strong><br><span class="muted small">${money(i.price)} each</span><br>
                 <button class="link-btn" data-action="remove" data-id="${i.id}">Remove</button></div>
               <div class="qty">
@@ -398,7 +462,7 @@ function renderPayment() {
           <h3>Order summary</h3>
           ${items.map(i => `
             <div class="row">
-              <div class="thumb">${i.emoji}</div>
+              <img class="thumb" src="${i.img}" alt="">
               <div class="info"><strong>${i.name}</strong><br><span class="muted small">Qty ${i.qty}</span></div>
               <strong>${money(i.price * i.qty)}</strong>
             </div>`).join('')}
@@ -427,7 +491,8 @@ function sessionCardHTML() {
     </div>`;
 }
 function runRowHTML(r) {
-  return `<div class="run-row"><span>${esc(r.symbol.split('-')[0])} · ${esc(REASONS[r.reason] || r.reason)}</span>
+  const name = r.strategy ? ' · ' + strategyOf(r.strategy).name : '';
+  return `<div class="run-row"><span>${esc(r.symbol.split('-')[0])}${esc(name)} · ${esc(REASONS[r.reason] || r.reason)}</span>
     <strong class="${r.pnlCents >= 0 ? 'good' : 'bad'}">${signedC(r.pnlCents)}</strong></div>`;
 }
 
@@ -436,7 +501,7 @@ function renderTrading() {
   if (!orderC) { location.hash = '#/'; return; }
   ensureTradeDefaults();
   market.instruments.forEach(loadHistory);
-  const t = state.trade, c = selectedCoin(), list = coins(), mv = maxVol();
+  const t = state.trade, c = selectedCoin();
   const s = series(c), st = s && s.stats;
   const minC = minInvestC(), maxC = maxInvestC(), f = market.fees;
   const capped = orderC > market.depositMax;
@@ -444,7 +509,9 @@ function renderTrading() {
   const notes = [
     ...c.notes,
     c.data === 'replay' ? 'Prices replay recorded market data.' : 'Follows the live market price.',
-    `Fees of ${pct(f.makerBps / 10000, 2)} to ${pct(f.takerBps / 10000, 2)} per trade are already included in your results.`,
+    f.model === 'solana'
+      ? `Each trade pays only a Solana network fee of about ${(f.solanaFeeCents || 0.1).toFixed(2)}¢, already included in your results.`
+      : `Fees of ${pct(f.makerBps / 10000, 2)} to ${pct(f.takerBps / 10000, 2)} per trade are already included in your results.`,
   ];
 
   app.innerHTML = `
@@ -455,14 +522,14 @@ function renderTrading() {
         <!-- LEFT COLUMN -->
         <div class="stack">
           <div class="card">
-            <h3>Select crypto</h3>
+            <h3>Choose a strategy</h3>
             <div class="crypto-list">
-              ${list.map(x => `
-                <button class="crypto-item ${x.symbol === c.symbol ? 'active' : ''}" data-action="select-crypto" data-id="${esc(x.symbol)}">
-                  <span><strong>${esc(x.base)}</strong> <span class="muted small">${esc(x.name)}</span></span>
-                  ${volTag(x, 'vol')}
+              ${strategies().map(x => `
+                <button class="crypto-item strategy-item ${x.id === t.strategy ? 'active' : ''}" data-action="select-strategy" data-id="${esc(x.id)}">
+                  <span class="strategy-head"><strong>${esc(x.name)}</strong> <span class="tag ${x.tagClass}">${esc(x.tag)}</span></span>
                 </button>`).join('')}
             </div>
+            <span class="hint" style="margin-bottom:12px">Every strategy trades Bitcoin (BTC).</span>
             <label class="field">Initial investment
               <div class="input-prefix"><span>$</span>
                 <input type="number" id="f-amount" data-field="amount" min="${minC / 100}" max="${maxC / 100}" step="0.01" value="${num(t.amount)}">
@@ -486,26 +553,6 @@ function renderTrading() {
             </div>
             <div class="muted small" style="margin:4px 0 8px">${chartCaption(s)}</div>
             ${s ? '<canvas id="chart"></canvas>' : '<div class="chart-loading">Loading price history…</div>'}
-
-            <div class="stats">
-              <div class="stat"><div class="label">Avg daily swing</div><div class="value">${st ? pct(st.vol) : '—'}</div></div>
-              <div class="stat"><div class="label">Max drawdown</div><div class="value">${st ? '−' + pct(st.maxDD, 0) : '—'}</div></div>
-              <div class="stat"><div class="label">${s ? s.values.length : HISTORY_DAYS}-day return</div><div class="value">${st ? (st.ret >= 0 ? '+' : '') + pct(st.ret, 0) : '—'}</div></div>
-              <div class="stat"><div class="label">Best day</div><div class="value">${st ? '+' + pct(st.bestDay) : '—'}</div></div>
-              <div class="stat"><div class="label">Worst day</div><div class="value">${st ? pct(st.worstDay) : '—'}</div></div>
-              <div class="stat"><div class="label">Latest price</div><div class="value">${s && s.latestCents ? usd(s.latestCents) : '—'}</div></div>
-            </div>
-
-            <strong class="small">Volatility vs. other cryptos</strong>
-            ${list.map(x => `
-              <div class="vol-row ${x.symbol === c.symbol ? 'active' : ''}">
-                <span>${esc(x.base)}</span>
-                <div class="vol-bar"><div style="width:${volOf(x) === null ? 0 : (volOf(x) / mv) * 100}%"></div></div>
-                <span>${volOf(x) === null ? '—' : pct(volOf(x))}</span>
-              </div>`).join('')}
-
-            <strong class="small" style="display:block;margin-top:14px">Things to know</strong>
-            <ul class="factors">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>
           </div>
 
           <div class="card">
@@ -584,7 +631,7 @@ function renderCheckout() {
           <h3>Order summary</h3>
           ${items.map(i => `
             <div class="row">
-              <div class="thumb">${i.emoji}</div>
+              <img class="thumb" src="${i.img}" alt="">
               <div class="info"><strong>${i.name}</strong><br><span class="muted small">Qty ${i.qty}</span></div>
               <strong>${money(i.price * i.qty)}</strong>
             </div>`).join('')}
@@ -609,7 +656,7 @@ function renderCheckout() {
 function completeOrder(paidC) {
   state = defaultState(); save(); updateCartCount();
   app.innerHTML = `<div class="page"><div class="card"><h2>Order placed ✅</h2>
-    <p class="muted">You paid ${moneyC(paidC)}. (Placeholder confirmation.)</p><a class="btn" href="#/">Keep shopping</a></div></div>`;
+    <p class="muted">You paid ${moneyC(paidC)}. </p><a class="btn" href="#/">Keep shopping</a></div></div>`;
 }
 
 /* ============================================================
@@ -709,12 +756,14 @@ async function startTrading() {
   const d = derived(), t = state.trade;
   startBusy = true; setStartError(''); updateSummary();
   try {
+    // The session names its own model (each person picks theirs), so the page no longer changes
+    // the server-wide default with POST /v1/bot.
     const s = await api('/v1/session', {
       method: 'POST',
-      body: JSON.stringify({ depositCents: d.depositC, instrument: t.symbol, floorCents: d.floorC, ceilingCents: d.ceilingC }),
+      body: JSON.stringify({ depositCents: d.depositC, instrument: t.symbol, strategy: t.strategy, floorCents: d.floorC, ceilingCents: d.ceilingC }),
     });
     state.active = {
-      sessionId: s.sessionId, symbol: s.instrument, depositCents: s.depositCents,
+      sessionId: s.sessionId, symbol: s.instrument, strategy: s.strategy || t.strategy, depositCents: s.depositCents,
       floorCents: s.floorCents, ceilingCents: s.ceilingCents,
       startedAt: Date.now(), durationMs: d.durationMs,
     };
@@ -724,7 +773,8 @@ async function startTrading() {
     openLiveModal(); connectWatch(); scheduleDuration();
   } catch (e) {
     if (e.code === 'offline') setStartError(`Can't reach the trading server at ${esc(API_BASE)}. Make sure it's running, then try again.`);
-    else if (e.code === 'session_running') setStartError('A trading session is already running on the server. <button class="link-btn" data-action="force-stop">Stop it and try again</button>');
+    else if (e.code === 'too_many_sessions') setStartError('The trading desk is full right now. Try again in a few minutes.');
+    else if (e.code === 'feed_unavailable') setStartError('Live Bitcoin prices are not available yet. Try again in a few seconds.');
     else setStartError(esc(e.message));
   } finally {
     startBusy = false; updateSummary();
@@ -745,7 +795,7 @@ function openLiveModal() {
   const base = a.symbol.split('-')[0];
   openModal(`
     <div class="modal-head">
-      <div><h2 style="margin:0">Live trading · ${esc(base)}</h2><div class="muted small">Demo: trades are simulated</div></div>
+      <div><h2 style="margin:0">Live trading · ${esc(base)}</h2><div class="muted small">${esc(strategyOf(a.strategy).name)} strategy · Demo: trades are simulated</div></div>
       <span id="lv-status" class="pill">Connecting…</span>
     </div>
     <div class="live-stats">
@@ -968,7 +1018,9 @@ function drawLive(canvas, pts, o) {
 function connectWatch() {
   closeWatch();
   let ws;
-  try { ws = new WebSocket(WS_BASE + '/v1/watch'); }
+  // Several people can trade at once, so watch only this page's own session.
+  const id = state.active ? state.active.sessionId : '';
+  try { ws = new WebSocket(WS_BASE + '/v1/watch?sessionId=' + encodeURIComponent(id)); }
   catch { live.reconnectTimer = setTimeout(connectWatch, 1500); return; }
   live.ws = ws; live.lastMsg = Date.now();
   ws.onopen = () => { live.connected = true; live.lastMsg = Date.now(); updateLive(); };
@@ -976,6 +1028,7 @@ function connectWatch() {
     live.lastMsg = Date.now();
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if ((m.type === 'snapshot' || m.type === 'halt') && m.session) onSession(m.session);
+    else if (m.type === 'error' && m.error && m.error.code === 'unknown_session') lostSession();
   };
   ws.onclose = () => {
     if (live.ws !== ws) return;
@@ -1020,7 +1073,7 @@ function finalizeRun(s) {
   if (reason === 'manual' && live.stopWhy === 'time') reason = 'time';
   const userStopped = reason === 'manual' && live.stopping;
   recordRun({
-    sessionId: s.sessionId, symbol: s.instrument, depositCents: s.depositCents,
+    sessionId: s.sessionId, symbol: s.instrument, strategy: s.strategy || a.strategy, depositCents: s.depositCents,
     stakeCents: halt.stakeCents ?? s.stakeCents, pnlCents: halt.poolPnlCents ?? s.poolPnlCents,
     reason, startedAt: a.startedAt, endedAt: Date.now(),
   });
@@ -1035,7 +1088,7 @@ function lostSession() {
   if (!a) return;
   const s = live.session;
   recordRun({
-    sessionId: a.sessionId, symbol: a.symbol, depositCents: a.depositCents,
+    sessionId: a.sessionId, symbol: a.symbol, strategy: a.strategy, depositCents: a.depositCents,
     stakeCents: s ? s.stakeCents : a.depositCents, pnlCents: s ? s.poolPnlCents : 0,
     reason: 'lost', startedAt: a.startedAt, endedAt: Date.now(),
   });
@@ -1046,7 +1099,7 @@ async function endTrading(why = 'manual') {
   if (!state.active || live.stopping) return;
   live.stopping = true; live.stopWhy = why; setLiveError(''); updateLive();
   try {
-    finalizeRun(await api('/v1/stop', { method: 'POST' }));
+    finalizeRun(await api('/v1/stop', { method: 'POST', body: JSON.stringify({ sessionId: state.active.sessionId }) }));
   } catch (e) {
     live.stopping = false; live.stopWhy = null;
     if (e.code === 'no_session') { lostSession(); return; }
@@ -1081,7 +1134,7 @@ const actions = {
   remove: id => { delete state.cart[id]; save(); route(); },
   'pay-full': () => completeOrder(cartTotalC()),
   activate: () => { location.hash = '#/trading'; },
-  'select-crypto': id => { state.trade.symbol = id; save(); renderTrading(); },
+  'select-strategy': id => { state.trade.strategy = strategyOf(id).id; save(); renderTrading(); },
   'set-pct': p => {
     const c = Math.min(Math.max(Math.round(cartTotalC() * Number(p) / 100), minInvestC()), maxInvestC());
     state.trade.amount = c / 100; save();
@@ -1089,10 +1142,6 @@ const actions = {
     updateSummary();
   },
   'start-trading': () => startTrading(),
-  'force-stop': async () => {
-    try { await api('/v1/stop', { method: 'POST' }); setStartError('Stopped the old session. Press Start trading again.'); }
-    catch (e) { setStartError(esc(e.message)); }
-  },
   'end-trading': () => endTrading('manual'),
   'close-live': () => closeLive(),
   'end-session': () => { if (!state.active) openEndConfirm(); },
@@ -1121,6 +1170,7 @@ document.addEventListener('input', e => {
   else if (field === 'maxLoss') { t.maxLoss = Number(raw); setText('v-maxLoss', t.maxLoss + '%'); }
   else if (field === 'hours') t.hours = Number(raw || 0);
   else if (field === 'minutes') t.minutes = Number(raw || 0);
+  else if (field === 'model') { t.model = raw; setText('model-hint', modelHint()); }
   save();
   updateSummary();
 });

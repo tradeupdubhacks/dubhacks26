@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import functools
 import json
+import os
 import time
 
 import websockets
@@ -14,8 +17,10 @@ from model.policy import (
     TRADE_EVERY_MS,
     Decision,
     IdSource,
+    HybridConfig,
     InstrumentLimits,
     decide,
+    decide_hybrid,
     within_rate_limit,
 )
 from model.score import Scorer
@@ -47,6 +52,13 @@ def limits_for(symbol: str, instruments: dict) -> InstrumentLimits | None:
 DECISION_INTERVAL = 0.1
 # With no live session the server sends one snapshot and then nothing.
 IDLE_PING = 5.0
+# Sessions this bot trades. The server tags each live session with the model it chose:
+# "network" is this one ("safe" is the older name). None is an older server with no tags.
+OWN_STRATEGIES = (None, "network", "safe")
+# The session models in model/live_session.py, by the command-line word that starts them.
+SESSION_MODELS = {"session": ("small",), "transformer": ("transformer",)}
+# A price window that is not full is reloaded from GET /v1/bars at most this often.
+SEED_RETRY_S = 2.0
 # Forget an in-flight command the server never confirmed.
 INFLIGHT_TTL = 2.0
 TERMINAL = ("canceled", "filled")
@@ -120,20 +132,35 @@ async def _send(socket, decision: Decision, sent_at: list[float], inflight: InFl
         await socket.send(json.dumps(message))
 
 
-async def session(base_url: str) -> None:
-    client = ModelClient(base_url)
+async def session(base_url: str, session_id: str | None = None) -> None:
+    """Trade one session. With `session_id`, only that session, returning once it halts.
+    Without one, the server's latest session, waiting for the next when it ends."""
+    # Tag every line with the session, since one bot now trades several at once.
+    print = functools.partial(builtins.print, f"[{session_id}]", flush=True) if session_id else builtins.print  # noqa: A001
+    client = ModelClient(base_url, session_id=session_id)
     client.health()
     catalog = {
         item["symbol"]: item
         for item in client.instruments()["instruments"]
     }
     scorer = Scorer()
+    policy_name = model_policy()
+    hybrid = hybrid_config()
+    if policy_name == "hybrid":
+        print(
+            f"policy: hybrid. long {hybrid.lots} lots when the forecast is >= {scorer.enter_bps:g} bps and the book "
+            f"leans {hybrid.enter_imbalance:g}; out when it is < {hybrid.exit_bps:g} bps or leans -{hybrid.exit_imbalance:g}"
+        )
+    else:
+        print("policy: pace (scale in and hold)")
     # The server remembers every id, including ones from an earlier connection.
     ids = IdSource(prefix=f"bot{int(time.time() * 1000):x}")
     inflight = InFlight()
     sent_at: list[float] = []
     loop = asyncio.get_running_loop()
     last_decision = 0.0
+    last_seed = float("-inf")
+    reload_reported = False
     waiting = False
     halted = False
     announced = False
@@ -168,7 +195,9 @@ async def session(base_url: str) -> None:
             observation = message.get("observation")
             if observation is None:
                 continue
-            if observation.get("stakeCents") is None and not observation.get("halted"):
+            owner = observation.get("strategy")
+            foreign = owner is not None and owner not in OWN_STRATEGIES
+            if foreign or (observation.get("stakeCents") is None and not observation.get("halted")):
                 scorer.reset()
                 entry_ts = None
                 last_trade_ts = None
@@ -178,7 +207,10 @@ async def session(base_url: str) -> None:
                 announced = False
                 ready_announced = False
                 if not waiting:
-                    print("waiting for a live session. Open one from the page.")
+                    if foreign:
+                        print(f"this session uses the {owner} strategy, which the hft bot trades. waiting for a safe session.")
+                    else:
+                        print("waiting for a live session. Open one from the page.")
                     waiting = True
                 continue
             if waiting:
@@ -211,13 +243,20 @@ async def session(base_url: str) -> None:
                 last_sign = 0
                 announced = False
                 ready_announced = False
-            if scorer.bucket is None:
+            if scorer.bucket is None or (not scorer.ready and now - last_seed >= SEED_RETRY_S):
                 # Start from the server's bar history instead of waiting two minutes to build one.
+                # A session that replaces another can leave stale bars ahead of the new clock,
+                # and the window then empties itself. Reload whenever it is not full.
+                last_seed = now
                 try:
                     history = client.bars()
                     if history.get("market") == symbol:
+                        scorer.reset()
                         loaded = scorer.seed(history.get("bars") or [])
-                        print(f"loaded {loaded} bars of price history from the server")
+                        # Reloads repeat every few seconds while the window fills; report only the first.
+                        if not reload_reported:
+                            print(f"loaded {loaded} bars of price history from the server")
+                            reload_reported = True
                 except ApiError as error:
                     print(f"no bar history ({error.code}), building the window live")
             expected = scorer.update(observation)
@@ -225,10 +264,13 @@ async def session(base_url: str) -> None:
                 print("price history is still filling. buys still go out on the 5s pace")
                 announced = True
             elif scorer.ready and not ready_announced:
-                print(
-                    f"price window ready. adding while the forecast stays above "
-                    f"{-HARD_EXIT_BPS:.0f} bps, then holding"
-                )
+                if policy_name == "hybrid":
+                    print(f"price window ready. buying when the forecast is >= {scorer.enter_bps:g} bps and the book leans up")
+                else:
+                    print(
+                        f"price window ready. adding while the forecast stays above "
+                        f"{-HARD_EXIT_BPS:.0f} bps, then holding"
+                    )
                 ready_announced = True
             position = int(observation.get("positionLots") or 0)
             sign = (position > 0) - (position < 0)
@@ -252,21 +294,26 @@ async def session(base_url: str) -> None:
             wall_idle = TRADE_EVERY_MS if last_trade_wall is None else max(0.0, (now - last_trade_wall) * 1000)
             idle_ms = int(max(market_idle, wall_idle))
             horizon = max(1, TRADE_EVERY_MS // max(1, scorer.bar_ms))
-            decision = decide(
-                view,
-                limits,
-                expected,
-                scorer.enter_bps,
-                scorer.exit_bps,
-                horizon,
-                held,
-                ids,
-                idle_ms,
-            )
+            if policy_name == "hybrid":
+                decision = decide_hybrid(view, limits, expected, scorer.enter_bps, ids, hybrid)
+            else:
+                decision = decide(
+                    view,
+                    limits,
+                    expected,
+                    scorer.enter_bps,
+                    scorer.exit_bps,
+                    horizon,
+                    held,
+                    ids,
+                    idle_ms,
+                )
             if decision.reason == "halted":
                 if not halted:
                     print("session halted, not sending orders")
                     halted = True
+                if session_id:
+                    return
                 continue
             halted = False
             if decision.reason in ("no_session", "empty_book") and not decision.orders:
@@ -280,10 +327,66 @@ async def session(base_url: str) -> None:
                 await _send(socket, decision, sent_at, inflight, view)
 
 
-async def run(base_url: str = "http://127.0.0.1:3000") -> None:
+STRATEGIES = ("model", "hft")
+POLICIES = ("hybrid", "pace")
+
+
+def model_policy() -> str:
+    """Feature flag for BOT_STRATEGY=model. MODEL_POLICY=hybrid (default) is forecast plus book
+    imbalance (decide_hybrid). MODEL_POLICY=pace is the scale-in-and-hold policy (decide)."""
+    name = os.environ.get("MODEL_POLICY", "hybrid").strip().lower() or "hybrid"
+    if name not in POLICIES:
+        raise SystemExit(f"Unknown MODEL_POLICY {name!r}. Use one of: {', '.join(POLICIES)}.")
+    return name
+
+
+def hybrid_config() -> HybridConfig:
+    base = HybridConfig()
+    return HybridConfig(
+        lots=int(os.environ.get("HYBRID_LOTS", base.lots)),
+        enter_imbalance=float(os.environ.get("HYBRID_ENTER_IMBALANCE", base.enter_imbalance)),
+        exit_imbalance=float(os.environ.get("HYBRID_EXIT_IMBALANCE", base.exit_imbalance)),
+        exit_bps=float(os.environ.get("HYBRID_EXIT_BPS", base.exit_bps)),
+        max_leverage=float(os.environ.get("HYBRID_MAX_LEVERAGE", base.max_leverage)),
+    )
+
+
+def strategy() -> str:
+    """Feature flag. BOT_STRATEGY=model (default) runs the network, BOT_STRATEGY=hft runs model/hft.py."""
+    name = os.environ.get("BOT_STRATEGY", "model").strip().lower() or "model"
+    if name not in STRATEGIES:
+        raise SystemExit(f"Unknown BOT_STRATEGY {name!r}. Use one of: {', '.join(STRATEGIES)}.")
+    return name
+
+
+# How often the supervisor reads GET /v1/sessions for new sessions to trade.
+SESSION_POLL_S = 1.0
+
+
+async def _trade(run_session, base_url: str, session_id: str) -> None:
+    """Trade one session until it halts. Reconnect if the stream drops while it still runs."""
     while True:
         try:
-            await session(base_url)
+            await run_session(base_url, session_id)
+            return
+        except SystemExit:
+            raise
+        except Exception as error:
+            try:
+                status = (await asyncio.to_thread(ModelClient(base_url, session_id=session_id).session)).get("status")
+            except Exception:
+                status = None
+            if status != "running":
+                return
+            print(f"[{session_id}] stream closed ({error!r}). Reconnecting.")
+            await asyncio.sleep(1)
+
+
+async def _single(run_session, base_url: str) -> None:
+    """Older servers run one session at a time and have no session list."""
+    while True:
+        try:
+            await run_session(base_url)
         except SystemExit:
             raise
         except Exception as error:
@@ -291,8 +394,84 @@ async def run(base_url: str = "http://127.0.0.1:3000") -> None:
             await asyncio.sleep(1)
 
 
+def _orphaned() -> bool:
+    """True when the server that started this bot (MODEL_BOT_CHILD=1, src/bot.ts) has died."""
+    return os.environ.get("MODEL_BOT_CHILD") == "1" and os.getppid() == 1
+
+
+async def run(base_url: str = "http://127.0.0.1:3000", kind: str | None = None) -> None:
+    """Supervisor: trade every running session of this bot's model, one task per session.
+
+    `kind` is "session" or "transformer" for the session models; otherwise BOT_STRATEGY picks
+    the team network ("model") or the hft rule bot."""
+    if kind in SESSION_MODELS:
+        import functools as _functools
+
+        from model.live_session import session as session_model
+
+        name, own = kind, SESSION_MODELS[kind]
+        run_session = _functools.partial(_session_model_task, session_model, kind)
+    else:
+        name = strategy()
+        if name == "hft":
+            from model.hft import OWN_STRATEGIES as own
+            from model.hft import session as run_session
+        else:
+            own, run_session = OWN_STRATEGIES, session
+    print(f"strategy: {name}")
+    client = ModelClient(base_url)
+    try:
+        await asyncio.to_thread(client.sessions)
+    except ApiError as error:
+        if error.status == 404:
+            print("this server has no GET /v1/sessions. trading its one session")
+            await _single(run_session, base_url)
+            return
+    except Exception:
+        pass  # server not up yet; the loop below keeps trying
+    print(f"watching {client.base_url}/v1/sessions for {' and '.join(str(x) for x in own if x)} sessions")
+    tasks: dict[str, asyncio.Task] = {}
+    down = False
+    while True:
+        if _orphaned():
+            raise SystemExit("the server that started this bot is gone")
+        try:
+            listed = await asyncio.to_thread(client.sessions)
+            if down:
+                print("server is back")
+            down = False
+        except Exception as error:
+            if not down:
+                print(f"cannot list sessions ({error!r}). retrying")
+            down = True
+            await asyncio.sleep(2)
+            continue
+        for item in listed:
+            session_id = item.get("sessionId")
+            if not session_id or item.get("status") != "running" or item.get("strategy") not in own:
+                continue
+            task = tasks.get(session_id)
+            if task is None or task.done():
+                print(f"[{session_id}] new {item.get('strategy')} session, trading it")
+                tasks[session_id] = asyncio.create_task(_trade(run_session, base_url, session_id))
+        listed_ids = {item.get("sessionId") for item in listed}
+        for session_id in [sid for sid, task in tasks.items() if task.done() and sid not in listed_ids]:
+            del tasks[session_id]
+        await asyncio.sleep(SESSION_POLL_S)
+
+
+async def _session_model_task(session_model, kind: str, base_url: str, session_id: str | None = None) -> None:
+    """model/live_session.py's session loop, with the policy word it expects."""
+    await session_model(base_url, "transformer" if kind == "transformer" else "session", session_id)
+
+
 def main() -> None:
-    asyncio.run(run())
+    import sys
+
+    # `python -m model.live session` and `transformer` run the session models in model/live_session.py.
+    # Like the other bots they supervise: one task per running session of their model.
+    kind = next((arg for arg in sys.argv[1:] if arg in SESSION_MODELS), None)
+    asyncio.run(run(os.environ.get("MODEL_API_URL", "http://127.0.0.1:3000"), kind))
 
 
 if __name__ == "__main__":

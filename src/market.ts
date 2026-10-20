@@ -2,7 +2,7 @@ import { OrderBook, type MatchFill, type RestingOrder } from './book.js'
 import { ChainError, type Chain, type SettlementLeg } from './chain.js'
 import { mulberry32, type Rng } from './rng.js'
 import { fetchSolBars, fetchSolMid } from './price.js'
-import { BtcTape, type TopOfBook } from './tape.js'
+import { BtcTape, type BtcSource, type LiveBtcSource, type TopOfBook } from './tape.js'
 import {
   BOOK_DEPTH,
   DEPOSIT_MAX,
@@ -10,15 +10,23 @@ import {
   FILL_HISTORY,
   HOUSE_CENTS,
   INSTRUMENTS,
+  LAMPORTS_PER_SOL,
   LATENCY_MS,
   MAKER_BPS,
   MAX_DT_MS,
   MID_HISTORY,
   RATE_LIMIT,
   RATE_WINDOW_MS,
+  DEFAULT_INSTRUMENT,
+  DEFAULT_STRATEGY,
+  SETTLEMENT_SIGNATURES,
+  STRATEGIES,
+  STRATEGY_ALIASES,
+  SOLANA_LAMPORTS_PER_SIGNATURE,
   STAKE_HISTORY,
   TAKER_BPS,
   feeCents,
+  type FeeModel,
   instrumentOf,
   notionalCents,
   rejectReasonMessage,
@@ -33,6 +41,7 @@ import {
   type PriceSource,
   type SessionView,
   type Side,
+  type Strategy,
   type UserFill,
 } from './types.js'
 
@@ -134,6 +143,7 @@ export class Market {
 
   private session: {
     id: string
+    strategy: Strategy
     deposit: number
     floor: number
     ceiling: number
@@ -157,11 +167,56 @@ export class Market {
   private sessionSeq = 0
   private extSeq = 0
 
+  /** Fractions of a cent of Solana fee not yet charged. Cash is whole cents, so they carry over. */
+  private feeCarry = 0
+  /** SOL price used to turn lamports into cents. Refreshed at session open and from the SOL feed. */
+  private solCents = 10_000
+
+  /** True when the current BTC-USDT session reads the live feed instead of the tape. */
+  private btcLive = false
+
   constructor(
     tapeDirectory: string,
     private readonly chain: Chain | null = null,
+    readonly feeModel: FeeModel = 'exchange',
+    /** Live BTC-USDT book for live sessions. Training always replays the tape. */
+    private readonly btcFeed: LiveBtcSource | null = null,
   ) {
     this.tape = new BtcTape(tapeDirectory)
+  }
+
+  /** Live sessions read the live feed when one is attached. Everything else replays the tape. */
+  private get btc(): BtcSource {
+    return this.btcLive && this.btcFeed ? this.btcFeed : this.tape
+  }
+
+  get btcFeedAttached(): boolean {
+    return this.btcFeed !== null
+  }
+
+  /** Network fee of one settlement transaction, in fractional cents. */
+  solanaFeeCents(): number {
+    return ((SOLANA_LAMPORTS_PER_SIGNATURE * SETTLEMENT_SIGNATURES) / LAMPORTS_PER_SOL) * this.solCents
+  }
+
+  feeView(): { model: FeeModel; makerBps: number; takerBps: number; solanaFeeCents: number } {
+    const exchange = this.feeModel === 'exchange'
+    return {
+      model: this.feeModel,
+      makerBps: exchange ? MAKER_BPS : 0,
+      takerBps: exchange ? TAKER_BPS : 0,
+      solanaFeeCents: exchange ? 0 : this.solanaFeeCents(),
+    }
+  }
+
+  /** Whole cents to charge for one fill. Solana fees carry their fraction to the next fill. */
+  private feeFor(notional: number, liquidity: 'maker' | 'taker'): number {
+    if (this.feeModel === 'exchange') return feeCents(notional, liquidity === 'maker' ? MAKER_BPS : TAKER_BPS)
+    this.feeCarry += this.solanaFeeCents()
+    // Ten 0.1-cent fees sum to 0.9999999999999999 in floating point; that is still one cent.
+    const whole = Math.floor(this.feeCarry + 1e-9)
+    this.feeCarry -= whole
+    return whole
   }
 
   get liveOpen(): boolean {
@@ -199,6 +254,7 @@ export class Market {
     return this.run(async () => {
       if (this.data !== 'reference' || this.halted) return []
       this.referenceMid = this.align(cents)
+      this.solCents = cents
       this.source = source
       this.quoteReference()
       const events = [...(await this.crossResting()), ...(await this.maybeHalt())]
@@ -260,6 +316,9 @@ export class Market {
       }
       if (this.mode === 'live' && this.instrument.symbol === 'SOL-USD') {
         return failure(409, 'step_not_for_live_mid', 'A live SOL-USD session advances on the wall clock.')
+      }
+      if (this.mode === 'live' && this.btcLive) {
+        return failure(409, 'step_not_for_live_feed', 'A live BTC-USDT session follows the live market on the wall clock.')
       }
       if (this.mode === 'idle') {
         return failure(409, 'session_required', 'Call reset before step, or open a BTC-USDT session.')
@@ -389,21 +448,28 @@ export class Market {
     })
   }
 
-  openSession(input: Record<string, unknown>): Promise<{ ok: true; session: SessionView } | Failure> {
+  /** `id` comes from the gateway, which numbers sessions across every market it runs. */
+  openSession(input: Record<string, unknown>, id?: string): Promise<{ ok: true; session: SessionView } | Failure> {
     return this.run(async () => {
       if (this.mode === 'live' && !this.halted) {
         return failure(409, 'session_running', 'A session is already running. Stop it before starting another.')
       }
-      const extra = unknown(input, new Set(['depositCents', 'instrument', 'floorCents', 'ceilingCents']))
+      const extra = unknown(input, new Set(['depositCents', 'instrument', 'floorCents', 'ceilingCents', 'strategy']))
       if (extra) return extra
       const deposit = input.depositCents
       if (!isInt(deposit) || deposit < DEPOSIT_MIN || deposit > DEPOSIT_MAX) {
         return failure(400, 'deposit_out_of_range', 'Deposit must be an integer from 100 to 10000 cents.')
       }
-      if (typeof input.instrument !== 'string' || !instrumentOf(input.instrument)) {
+      const symbol = input.instrument === undefined ? DEFAULT_INSTRUMENT : input.instrument
+      if (typeof symbol !== 'string' || !instrumentOf(symbol)) {
         return failure(400, 'unknown_instrument', 'Instrument is not available.')
       }
-      const inst = instrumentOf(input.instrument)!
+      const inst = instrumentOf(symbol)!
+      const named = input.strategy === undefined ? DEFAULT_STRATEGY : input.strategy
+      const strategy = typeof named === 'string' ? (STRATEGY_ALIASES[named] ?? named) : named
+      if (typeof strategy !== 'string' || !STRATEGIES.includes(strategy as Strategy)) {
+        return failure(400, 'bad_strategy', `Strategy must be one of: ${STRATEGIES.join(', ')}.`)
+      }
       const floor = input.floorCents === undefined ? 0 : input.floorCents
       if (!isInt(floor) || floor < 0 || floor >= deposit) {
         return failure(400, 'floor_out_of_range', 'Floor must be an integer from 0 up to, but not including, the deposit.')
@@ -411,6 +477,9 @@ export class Market {
       if (input.ceilingCents === undefined) return failure(400, 'ceiling_required', 'Ceiling is required.')
       if (!isInt(input.ceilingCents) || input.ceilingCents <= deposit) {
         return failure(400, 'ceiling_not_above_deposit', 'Ceiling must be an integer strictly above the deposit.')
+      }
+      if (inst.symbol === 'BTC-USDT' && this.btcFeed && !this.btcFeed.available) {
+        return failure(503, 'feed_unavailable', 'Live Bitcoin prices are not available right now. Try again in a few seconds.')
       }
       if (this.chain) {
         try {
@@ -428,8 +497,13 @@ export class Market {
         deposit,
       })
       await this.preroll()
+      if (this.feeModel === 'solana') {
+        const sol = await fetchSolMid()
+        if (sol) this.solCents = sol.cents
+      }
       this.session = {
-        id: `sess_${++this.sessionSeq}`,
+        id: id ?? `sess_${++this.sessionSeq}`,
+        strategy: strategy as Strategy,
         deposit,
         floor,
         ceiling: input.ceilingCents,
@@ -473,6 +547,7 @@ export class Market {
           }
         : null,
       instrument: this.instrument.symbol,
+      strategy: this.session.strategy,
       depositCents: this.session.deposit,
       floorCents: this.session.floor,
       ceilingCents: this.session.ceiling,
@@ -529,6 +604,7 @@ export class Market {
       stakeCents: live ? (this.frozenStake ?? this.stakeCents()) : null,
       floorCents: live ? this.session!.floor : null,
       ceilingCents: live ? this.session!.ceiling : null,
+      strategy: live ? this.session!.strategy : null,
       step: this.stepCount,
       done: this.mode === 'training' && this.stepCount >= this.episodeSteps,
     }
@@ -568,13 +644,15 @@ export class Market {
     this.lastTrade = null
     this.mids = []
     this.bars = []
+    this.feeCarry = 0
     this.referenceMid = null
     if (this.mode !== 'live') this.session = null
+    this.btcLive = input.mode === 'live' && input.instrument.symbol === 'BTC-USDT' && this.btcFeed !== null
     if (input.instrument.symbol === 'BTC-USDT') {
       this.data = 'tape'
-      this.source = 'tape'
-      if (!this.tape.available) throw new Error('BTC tape files are missing')
-      const top = await this.tape.open()
+      this.source = this.btcLive ? 'binance' : 'tape'
+      if (!this.btc.available) throw new Error(this.btcLive ? 'Live BTC prices are unavailable' : 'BTC tape files are missing')
+      const top = await this.btc.open()
       this.applyTop(top)
     } else if (input.mode === 'live') {
       this.data = 'reference'
@@ -621,8 +699,9 @@ export class Market {
 
   private async moveBook(marketMs: number): Promise<MarketEvent[]> {
     if (this.data === 'tape') {
-      const top = await this.tape.advance(marketMs)
+      const top = await this.btc.advance(marketMs)
       this.applyTop(top, marketMs)
+      if (this.btcLive && this.btcFeed) this.source = this.btcFeed.stale ? 'stale' : 'binance'
       return []
     }
     if (this.data === 'synthetic') return this.quoteSynthetic(marketMs - this.marketMs)
@@ -674,7 +753,16 @@ export class Market {
    * History is skipped, not faked, when it is unavailable.
    */
   private async preroll(): Promise<void> {
-    if (this.data === 'tape') {
+    if (this.data === 'tape' && this.btcLive && this.btcFeed) {
+      // The live feed has been sampling the book since the server started.
+      const history = this.btcFeed.history(BAR_HISTORY)
+      for (let i = 0; i < history.length; i += 1) {
+        this.marketMs = (i + 1) * BAR_MS
+        this.applyTop(history[i], this.marketMs)
+        this.recordBar()
+      }
+      this.applyTop(await this.btcFeed.open(), this.marketMs)
+    } else if (this.data === 'tape') {
       for (let i = 1; i <= BAR_HISTORY; i += 1) {
         this.marketMs = i * BAR_MS
         this.applyTop(await this.tape.advance(this.marketMs), this.marketMs)
@@ -840,8 +928,8 @@ export class Market {
       const qty = Math.min(left, order.remaining)
       order.remaining -= qty
       if (order.remaining === 0) this.book.cancelId(order.orderId)
-      this.applyPool(order.side, order.price, qty, 'maker')
-      events.push(this.recordFill(order.clientOrderId, order.orderId, order.side, order.price, qty, 'maker', null))
+      const fee = this.applyPool(order.side, order.price, qty, 'maker')
+      events.push(this.recordFill(order.clientOrderId, order.orderId, order.side, order.price, qty, 'maker', null, fee))
       this.finishIfFlat(order.clientOrderId)
       this.lastTrade = { price: order.price, size: qty, side, ts: this.marketMs }
       events.push({ type: 'trade', price: order.price, size: qty, side, ts: this.marketMs })
@@ -1044,13 +1132,13 @@ export class Market {
     let filled = 0
     for (const fill of result.fills) {
       if (fill.maker.account === 'pool') {
-        this.applyPool(fill.maker.side, fill.price, fill.size, 'maker')
-        events.push(this.recordFill(fill.maker.clientOrderId, fill.maker.orderId, fill.maker.side, fill.price, fill.size, 'maker', signature))
+        const fee = this.applyPool(fill.maker.side, fill.price, fill.size, 'maker')
+        events.push(this.recordFill(fill.maker.clientOrderId, fill.maker.orderId, fill.maker.side, fill.price, fill.size, 'maker', signature, fee))
         this.finishIfFlat(fill.maker.clientOrderId)
       }
       if (fill.takerAccount === 'pool') {
-        this.applyPool(side, fill.price, fill.size, liquidity)
-        events.push(this.recordFill(clientOrderId, orderId, side, fill.price, fill.size, liquidity, signature))
+        const fee = this.applyPool(side, fill.price, fill.size, liquidity)
+        events.push(this.recordFill(clientOrderId, orderId, side, fill.price, fill.size, liquidity, signature, fee))
         filled += fill.size
       }
       this.lastTrade = { price: fill.price, size: fill.size, side: fill.takerSide, ts: this.marketMs }
@@ -1175,9 +1263,10 @@ export class Market {
     return events
   }
 
-  private applyPool(side: Side, price: number, size: number, liquidity: 'maker' | 'taker'): void {
+  /** Books one pool fill and returns the fee charged for it, in whole cents. */
+  private applyPool(side: Side, price: number, size: number, liquidity: 'maker' | 'taker'): number {
     const notion = notionalCents(price, size)
-    const fee = feeCents(notion, liquidity === 'maker' ? MAKER_BPS : TAKER_BPS)
+    const fee = this.feeFor(notion, liquidity)
     if (side === 'buy') this.cash -= notion + fee
     else this.cash += notion - fee
     const prev = this.position
@@ -1189,7 +1278,7 @@ export class Market {
       this.avg = nextAbs === 0 ? 0 : Math.round((this.avg * prevAbs + price * size) / nextAbs)
       this.position = next
       this.realized -= fee
-      return
+      return fee
     }
     const close = Math.min(size, Math.abs(prev))
     const pnl =
@@ -1200,6 +1289,7 @@ export class Market {
     this.position = prev + sign * size
     if (this.position === 0) this.avg = 0
     else if (Math.sign(this.position) === sign) this.avg = price
+    return fee
   }
 
   private async chainSignature(takerSide: Side, result: { fills: MatchFill[] }): Promise<string | null> {
@@ -1222,15 +1312,15 @@ export class Market {
     size: number,
     liquidity: 'maker' | 'taker',
     signature: string | null,
+    fee: number,
   ): MarketEvent {
-    const notion = notionalCents(price, size)
     const fill: StoredFill = {
       clientOrderId,
       orderId,
       side,
       price,
       size,
-      fee: feeCents(notion, liquidity === 'maker' ? MAKER_BPS : TAKER_BPS),
+      fee,
       liquidity,
       signature,
       ts: this.marketMs,
@@ -1397,20 +1487,27 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
-export function instrumentsBody() {
+export function instrumentsBody(
+  fees: ReturnType<Market['feeView']> = { model: 'exchange', makerBps: MAKER_BPS, takerBps: TAKER_BPS, solanaFeeCents: 0 },
+  btcLive = false,
+) {
   return {
     houseFundCents: HOUSE_CENTS,
     deposit: { minCents: DEPOSIT_MIN, maxCents: DEPOSIT_MAX },
-    fees: { makerBps: MAKER_BPS, takerBps: TAKER_BPS },
+    fees,
     instruments: INSTRUMENTS.map((item) => ({
       symbol: item.symbol,
       base: item.base,
       quote: item.quote,
       priceTickCents: item.priceTickCents,
       lotSize: item.lotSize,
-      data: item.data,
-      ...(item.tape ? { tape: item.tape } : {}),
-      ...(item.sources ? { sources: item.sources } : {}),
+      ...(item.symbol === 'BTC-USDT' && btcLive
+        ? { data: 'live', sources: ['binance'] }
+        : {
+            data: item.data,
+            ...(item.tape ? { tape: item.tape } : {}),
+            ...(item.sources ? { sources: item.sources } : {}),
+          }),
     })),
   }
 }

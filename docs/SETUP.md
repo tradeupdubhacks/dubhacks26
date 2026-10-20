@@ -30,8 +30,10 @@ The BTC replay files are already in `hft/data/raw/` (`BTCUSDT_20261001_book_tick
 ## Start
 
 ```bash
-npm start
+USE_CHAIN=1 npm start
 ```
+
+Without `USE_CHAIN`, the server skips the validator and fills are faked (`/v1/health` reports `"execution":"fake"`).
 
 The HTTP server listens on `http://127.0.0.1:3000`. On startup it launches `solana-test-validator` at `http://127.0.0.1:8899` and creates two dummy token accounts under `.local-solana/`. The first start can take about half a minute. Validator logs go to `.local-solana/validator.log`.
 
@@ -47,6 +49,7 @@ Optional environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `USE_CHAIN` | unset | Set to any value to start the validator and settle fills on it |
 | `PORT` | `3000` | HTTP and WebSocket port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `SOLANA_RPC` | `http://127.0.0.1:8899` | Validator the gateway settles against |
@@ -70,3 +73,25 @@ On Windows, PyTorch also needs the Microsoft Visual C++ Redistributable (`https:
 - **Live trading**, after the page has created a session: `POST /v1/orders` and `ws://127.0.0.1:3000/v1/stream`. Each fill is an SPL token transfer on the local validator. The fill's `signature` is that transaction.
 
 `POST /v1/reset` returns `409` while a live session exists. Stop the session from the page first. The full request shapes are in [docs/model-api.md](docs/model-api.md).
+
+### Models and several users
+
+Each person picks a model for their own session on the page. The session is tagged with the model's id, and that model's bot trades only sessions with its id:
+
+| Page card | `strategy` | Bot |
+| --- | --- | --- |
+| Faster, high risk | `hft` | `model/hft.py`, the rule bot (`BOT_STRATEGY=hft python -m model.live`) |
+| Slower, low risk | `network` | the team network with the hybrid policy (`python -m model.live`) |
+| Transformer, medium risk | `transformer` | `python -m model.live transformer` (`model/live_session.py`, [TRANSFORMER.md](../model/TRANSFORMER.md)) |
+| Small network, rarely trades | `small` | `python -m model.live session` ([SESSION_MODEL.md](../model/SESSION_MODEL.md)) |
+
+`POST /v1/session` still accepts the older names `fast` (for `hft`) and `safe` (for `network`).
+
+**Starting the bots.** The server starts them itself (`src/bot.ts`). Each model's bot process starts when the first running session needs that model, and stops when its last session ends. One process per model trades all of that model's sessions, one task per session.
+
+- `MODEL_BOT=off` starts nothing. You then run the commands in the table yourself; each one also trades only its own model's sessions.
+- `GET /v1/bot` lists the models.
+- `POST /v1/bot {"model": "..."}` sets the default for a session that names no model (`MODEL_BOT_KIND`, default `transformer`). It does not change sessions that already chose a model.
+
+**Limits.** Up to 20 sessions trade at once. Each one is separate: its own stake, floor, ceiling, and model. All the models were tuned with `FEE_MODEL=solana`.
+

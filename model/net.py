@@ -41,3 +41,21 @@ class SignalNet(nn.Module):
         hidden = self.conv(seq)
         pooled = torch.cat([hidden.mean(dim=-1), hidden[:, :, -1]], dim=-1)
         return self.mlp(torch.cat([raw, pooled], dim=-1))
+
+
+class SmallNet(nn.Module):
+    """The small feed-forward network behind the session policy (model/session_policy.py, artifacts/session_signal.pt):
+    n_features -> 32 -> 16 -> 1 logit for 'the mid is higher after the horizon'. Separate from SignalNet above."""
+
+    def __init__(self, n_features: int = 4) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_features, 32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features).squeeze(-1)

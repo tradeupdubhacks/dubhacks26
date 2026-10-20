@@ -1,0 +1,133 @@
+scenario,R,T,p_reach,p_reach_ci,p_stopout,p_end_below_deposit,median_days_to_hit,p_end_above_target_only
+"ML measured net (best model, mean)",0.1,7,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.1,30,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.1,60,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.1,90,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.15,7,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.15,30,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.15,60,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.15,90,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.2,7,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.2,30,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.2,60,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, mean)",0.2,90,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.1,7,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.1,30,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.1,60,0.0001,0.00013858599929285784,0.9999,0.9999,1.5,0.0
+"ML measured net (best model, CI upper)",0.1,90,5e-05,9.799754996937423e-05,0.99995,0.99995,0.0,0.0
+"ML measured net (best model, CI upper)",0.15,7,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.15,30,5e-05,9.799754996937423e-05,0.99995,0.99995,0.0,0.0
+"ML measured net (best model, CI upper)",0.15,60,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.15,90,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.2,7,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.2,30,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.2,60,0.0,0.0,1.0,1.0,,0.0
+"ML measured net (best model, CI upper)",0.2,90,0.0,0.0,1.0,1.0,,0.0
+"Hypothetical vol-targeted strat, net Sharpe 0",0.1,7,0.00565,0.0010388071650696293,0.0005,0.50625,4.0,0.00455
+"Hypothetical vol-targeted strat, net Sharpe 0",0.1,30,0.13595,0.00475007117081418,0.02205,0.50295,19.0,0.08455
+"Hypothetical vol-targeted strat, net Sharpe 0",0.1,60,0.27835,0.006211550127158277,0.0974,0.4972,31.0,0.1584
+"Hypothetical vol-targeted strat, net Sharpe 0",0.1,90,0.37585,0.006712631989182783,0.17525,0.4804,39.0,0.2056
+"Hypothetical vol-targeted strat, net Sharpe 0",0.15,7,0.001,0.0004380501341170894,0.0006,0.5085,6.0,0.0009
+"Hypothetical vol-targeted strat, net Sharpe 0",0.15,30,0.03805,0.002651518450963523,0.0215,0.5081,22.0,0.02625
+"Hypothetical vol-targeted strat, net Sharpe 0",0.15,60,0.1297,0.004656349316020008,0.09705,0.5168,39.0,0.07825
+"Hypothetical vol-targeted strat, net Sharpe 0",0.15,90,0.20845,0.005629647467453002,0.1767,0.5222,52.0,0.11295
+"Hypothetical vol-targeted strat, net Sharpe 0",0.2,7,0.00015,0.00016972824809088202,0.00065,0.50545,3.0,0.0001
+"Hypothetical vol-targeted strat, net Sharpe 0",0.2,30,0.0082,0.00124985620804955,0.0223,0.5148,23.5,0.00555
+"Hypothetical vol-targeted strat, net Sharpe 0",0.2,60,0.0497,0.0030119629999055433,0.10245,0.52665,44.0,0.02925
+"Hypothetical vol-targeted strat, net Sharpe 0",0.2,90,0.106,0.004266411738217491,0.17675,0.5237,60.5,0.05845
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.1,7,0.0065,0.0011137345374908692,0.0005,0.47805,5.0,0.0053
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.1,30,0.16355,0.00512609134056349,0.0151,0.4524,19.0,0.106
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.1,60,0.34195,0.006574334912050039,0.07185,0.42585,31.0,0.2104
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.1,90,0.46205,0.00690965743751454,0.12105,0.3838,39.0,0.28115
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.15,7,0.00095,0.000426969141507908,0.0006,0.4731,3.0,0.0008
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.15,30,0.0477,0.002953841278200303,0.0151,0.4542,23.0,0.0337
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.15,60,0.1677,0.005177827194567235,0.071,0.43855,39.0,0.10435
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.15,90,0.2798,0.006221448165564027,0.12295,0.4151,52.0,0.17025
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.2,7,0.00015,0.00016972824809088202,0.0004,0.47935,6.0,0.00015
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.2,30,0.01155,0.0014808443698782125,0.01435,0.4507,25.0,0.00825
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.2,60,0.0766,0.0036859580946071537,0.07025,0.44085,44.0,0.04865
+"Hypothetical vol-targeted strat, net Sharpe 0.5",0.2,90,0.1582,0.005057650021581169,0.12655,0.4256,61.0,0.0958
+"Hypothetical vol-targeted strat, net Sharpe 1",0.1,7,0.0079,0.0012269654792209925,0.0006,0.4434,5.0,0.00705
+"Hypothetical vol-targeted strat, net Sharpe 1",0.1,30,0.19685,0.005510704391110088,0.01165,0.39495,19.0,0.1336
+"Hypothetical vol-targeted strat, net Sharpe 1",0.1,60,0.41465,0.006827940371019654,0.04845,0.3445,31.0,0.27695
+"Hypothetical vol-targeted strat, net Sharpe 1",0.1,90,0.54975,0.006895258515458286,0.08555,0.2959,38.0,0.37015
+"Hypothetical vol-targeted strat, net Sharpe 1",0.15,7,0.00085,0.00040389258745364464,0.00045,0.44195,5.0,0.00065
+"Hypothetical vol-targeted strat, net Sharpe 1",0.15,30,0.05925,0.0032720683298183124,0.01225,0.3958,22.0,0.0415
+"Hypothetical vol-targeted strat, net Sharpe 1",0.15,60,0.2255,0.005791953382063774,0.04925,0.3656,39.0,0.1492
+"Hypothetical vol-targeted strat, net Sharpe 1",0.15,90,0.3631,0.006664841449817092,0.0851,0.32545,52.0,0.24305
+"Hypothetical vol-targeted strat, net Sharpe 1",0.2,7,0.0001,0.00013858599929285784,0.0006,0.44355,3.0,0.0001
+"Hypothetical vol-targeted strat, net Sharpe 1",0.2,30,0.0158,0.00172826883001459,0.01165,0.39485,24.0,0.01165
+"Hypothetical vol-targeted strat, net Sharpe 1",0.2,60,0.106,0.004266411738217491,0.0491,0.35325,44.0,0.0717
+"Hypothetical vol-targeted strat, net Sharpe 1",0.2,90,0.2268,0.005803747656540557,0.0854,0.3274,60.0,0.1531
+"Hypothetical vol-targeted strat, net Sharpe 2",0.1,7,0.01015,0.0013891808515092627,0.0003,0.38605,5.0,0.009
+"Hypothetical vol-targeted strat, net Sharpe 2",0.1,30,0.27875,0.006214288686165135,0.0075,0.29075,19.0,0.20465
+"Hypothetical vol-targeted strat, net Sharpe 2",0.1,60,0.57105,0.006859326531941747,0.0226,0.20765,29.0,0.42965
+"Hypothetical vol-targeted strat, net Sharpe 2",0.1,90,0.71945,0.006226536216533234,0.0362,0.15135,36.0,0.57185
+"Hypothetical vol-targeted strat, net Sharpe 2",0.15,7,0.0013,0.0004993789991579542,0.0003,0.38845,4.5,0.0011
+"Hypothetical vol-targeted strat, net Sharpe 2",0.15,30,0.09835,0.0041271214498970095,0.00635,0.2859,23.0,0.07345
+"Hypothetical vol-targeted strat, net Sharpe 2",0.15,60,0.3598,0.0066516515119780595,0.0223,0.2164,38.0,0.2695
+"Hypothetical vol-targeted strat, net Sharpe 2",0.15,90,0.5496,0.006895466080490862,0.03635,0.16955,50.0,0.42415
+"Hypothetical vol-targeted strat, net Sharpe 2",0.2,7,5e-05,9.799754996937423e-05,0.00065,0.3813,4.0,5e-05
+"Hypothetical vol-targeted strat, net Sharpe 2",0.2,30,0.0287,0.0023139752861255887,0.00715,0.29095,24.5,0.02215
+"Hypothetical vol-targeted strat, net Sharpe 2",0.2,60,0.2002,0.005545794976087738,0.0235,0.2186,44.0,0.1479
+"Hypothetical vol-targeted strat, net Sharpe 2",0.2,90,0.39085,0.006762515226023525,0.03645,0.1758,59.0,0.298
+"Hypothetical vol-targeted strat, net Sharpe 3",0.1,7,0.0133,0.0015876671467281798,0.00015,0.3293,5.0,0.0115
+"Hypothetical vol-targeted strat, net Sharpe 3",0.1,30,0.3793,0.006724707015238657,0.0042,0.2005,19.0,0.2943
+"Hypothetical vol-targeted strat, net Sharpe 3",0.1,60,0.7122,0.006274620340132142,0.00955,0.11105,28.0,0.59315
+"Hypothetical vol-targeted strat, net Sharpe 3",0.1,90,0.85625,0.004862339650312389,0.01645,0.0643,32.0,0.75275
+"Hypothetical vol-targeted strat, net Sharpe 3",0.15,7,0.001,0.0004380501341170894,0.0004,0.3311,5.0,0.00095
+"Hypothetical vol-targeted strat, net Sharpe 3",0.15,30,0.1558,0.005026289210620496,0.00465,0.198,23.0,0.1218
+"Hypothetical vol-targeted strat, net Sharpe 3",0.15,60,0.50695,0.006928976984793642,0.0121,0.1183,37.0,0.41055
+"Hypothetical vol-targeted strat, net Sharpe 3",0.15,90,0.7285,0.006163689724507553,0.0146,0.0737,46.0,0.62265
+"Hypothetical vol-targeted strat, net Sharpe 3",0.2,7,0.00025,0.00021910726825005145,0.00025,0.3338,6.0,0.00025
+"Hypothetical vol-targeted strat, net Sharpe 3",0.2,30,0.05215,0.0030813287572409405,0.0043,0.19695,25.0,0.0419
+"Hypothetical vol-targeted strat, net Sharpe 3",0.2,60,0.32545,0.00649367104986078,0.0117,0.1201,43.0,0.25735
+"Hypothetical vol-targeted strat, net Sharpe 3",0.2,90,0.5718,0.006857826295612918,0.01615,0.0785,56.0,0.4779
+"Hypothetical vol-targeted strat, net Sharpe 5",0.1,7,0.0206,0.001968587547253106,0.0006,0.2327,5.0,0.0184
+"Hypothetical vol-targeted strat, net Sharpe 5",0.1,30,0.6128,0.0067510002823877886,0.0013,0.079,18.0,0.53155
+"Hypothetical vol-targeted strat, net Sharpe 5",0.1,60,0.91275,0.0039111071316188725,0.00255,0.0209,23.0,0.8554
+"Hypothetical vol-targeted strat, net Sharpe 5",0.1,90,0.9754,0.00214684160272713,0.00295,0.0085,24.0,0.95215
+"Hypothetical vol-targeted strat, net Sharpe 5",0.15,7,0.00175,0.0005792682927625161,0.0003,0.2361,5.0,0.0015
+"Hypothetical vol-targeted strat, net Sharpe 5",0.15,30,0.33625,0.006547484621975068,0.0015,0.0808,22.0,0.2881
+"Hypothetical vol-targeted strat, net Sharpe 5",0.15,60,0.7947,0.005598054918701674,0.00255,0.02375,33.0,0.72845
+"Hypothetical vol-targeted strat, net Sharpe 5",0.15,90,0.9395,0.0033042062859331284,0.00335,0.01085,36.0,0.9048
+"Hypothetical vol-targeted strat, net Sharpe 5",0.2,7,0.0003,0.00024001398459256492,0.00035,0.23155,4.5,0.0003
+"Hypothetical vol-targeted strat, net Sharpe 5",0.2,30,0.14285,0.004849641222832881,0.00165,0.0745,24.0,0.12255
+"Hypothetical vol-targeted strat, net Sharpe 5",0.2,60,0.62995,0.006691512875262215,0.00305,0.02545,40.0,0.5661
+"Hypothetical vol-targeted strat, net Sharpe 5",0.2,90,0.87475,0.004587456048290817,0.00345,0.0111,46.0,0.8276
+"BTC spot long, zero drift, vol 45%",0.1,7,0.07215,0.0035858996123985403,0.0108,0.5111,4.0,0.05385
+"BTC spot long, zero drift, vol 45%",0.1,30,0.35635,0.006637497062462627,0.17225,0.48795,13.0,0.20545
+"BTC spot long, zero drift, vol 45%",0.1,60,0.49255,0.006928877187524685,0.32075,0.44955,18.0,0.2687
+"BTC spot long, zero drift, vol 45%",0.1,90,0.54405,0.006902701463036048,0.37705,0.4318,20.0,0.294
+"BTC spot long, zero drift, vol 45%",0.15,7,0.01545,0.0017093232648624425,0.011,0.51425,4.0,0.01175
+"BTC spot long, zero drift, vol 45%",0.15,30,0.20475,0.005592485511380428,0.174,0.51925,17.0,0.11985
+"BTC spot long, zero drift, vol 45%",0.15,60,0.3547,0.006630594977285221,0.33985,0.51055,26.0,0.19785
+"BTC spot long, zero drift, vol 45%",0.15,90,0.42875,0.006858928041246679,0.419,0.50605,31.0,0.23515
+"BTC spot long, zero drift, vol 45%",0.2,7,0.0041,0.0008856066481231947,0.01045,0.51385,5.0,0.00325
+"BTC spot long, zero drift, vol 45%",0.2,30,0.10605,0.0042672985121502815,0.17285,0.52235,20.0,0.0653
+"BTC spot long, zero drift, vol 45%",0.2,60,0.24155,0.005932094656004741,0.33915,0.5345,32.0,0.1378
+"BTC spot long, zero drift, vol 45%",0.2,90,0.32235,0.006477503139188742,0.43845,0.55055,40.0,0.1732
+"BTC spot long, zero drift, vol 80%",0.1,7,0.2345,0.005871987123623484,0.0955,0.50275,3.0,0.1652
+"BTC spot long, zero drift, vol 80%",0.1,30,0.52255,0.0069225953832215276,0.3742,0.44455,7.0,0.29585
+"BTC spot long, zero drift, vol 80%",0.1,60,0.56595,0.006869102326199546,0.4238,0.43105,8.0,0.3228
+"BTC spot long, zero drift, vol 80%",0.1,90,0.57095,0.006859525348579156,0.42805,0.4288,8.0,0.33235
+"BTC spot long, zero drift, vol 80%",0.15,7,0.1145,0.00441304239499237,0.09525,0.5097,4.0,0.08405
+"BTC spot long, zero drift, vol 80%",0.15,30,0.39735,0.006782038684510727,0.4065,0.51435,11.0,0.2238
+"BTC spot long, zero drift, vol 80%",0.15,60,0.4798,0.006923989000337883,0.49155,0.5077,13.0,0.2813
+"BTC spot long, zero drift, vol 80%",0.15,90,0.49365,0.006929087591754054,0.50175,0.5045,13.0,0.2925
+"BTC spot long, zero drift, vol 80%",0.2,7,0.0559,0.00318387476123041,0.0948,0.5156,5.0,0.0436
+"BTC spot long, zero drift, vol 80%",0.2,30,0.30025,0.006352636932408463,0.42335,0.5536,14.0,0.17315
+"BTC spot long, zero drift, vol 80%",0.2,60,0.40265,0.006797032699509397,0.5374,0.56495,18.0,0.2357
+"BTC spot long, zero drift, vol 80%",0.2,90,0.42385,0.0068488073541456826,0.56075,0.56775,18.0,0.25555
+"BTC spot long, zero drift, vol 31% (this day)",0.1,7,0.01825,0.001855124080755786,0.00135,0.5024,5.0,0.01445
+"BTC spot long, zero drift, vol 31% (this day)",0.1,30,0.20575,0.0056025998746117855,0.05475,0.5064,17.0,0.12525
+"BTC spot long, zero drift, vol 31% (this day)",0.1,60,0.36345,0.006666220446984933,0.17215,0.48585,26.0,0.2015
+"BTC spot long, zero drift, vol 31% (this day)",0.1,90,0.44985,0.006894701913658051,0.2606,0.46,32.0,0.23995
+"BTC spot long, zero drift, vol 31% (this day)",0.15,7,0.0022,0.0006493430008862804,0.0018,0.50945,5.0,0.00165
+"BTC spot long, zero drift, vol 31% (this day)",0.15,30,0.0777,0.0037101176985103856,0.05555,0.5231,21.0,0.0504
+"BTC spot long, zero drift, vol 31% (this day)",0.15,60,0.2024,0.005568508671017761,0.1738,0.5188,34.0,0.11295
+"BTC spot long, zero drift, vol 31% (this day)",0.15,90,0.29215,0.006302525870649006,0.2711,0.51755,45.0,0.15735
+"BTC spot long, zero drift, vol 31% (this day)",0.2,7,0.0006,0.00033938009841474203,0.00185,0.5037,4.0,0.00035
+"BTC spot long, zero drift, vol 31% (this day)",0.2,30,0.0261,0.0022096246702098528,0.05655,0.51775,23.0,0.01705
+"BTC spot long, zero drift, vol 31% (this day)",0.2,60,0.10415,0.00423339078070995,0.1734,0.5259,40.0,0.05885
+"BTC spot long, zero drift, vol 31% (this day)",0.2,90,0.1832,0.005361195849882748,0.2691,0.53095,54.0,0.1005
